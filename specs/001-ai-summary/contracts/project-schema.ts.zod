@@ -1,0 +1,61 @@
+// Zod Schema Contract: Project Collection with aiSummary Field
+// Feature: 001-ai-summary
+// This file documents the schema changes for type safety contracts
+
+import { z } from 'astro:content';
+
+/**
+ * Project Collection Schema
+ * Extended with aiSummary field for AI-generated project summaries
+ */
+export const projectSchema = z.object({
+  // === Existing Fields (from 001-lab-results-site) ===
+  id: z.string().describe('Unique project identifier'),
+  title: z.string().describe('Project title'),
+  description: z.string().describe('Full project description'),
+  type: z.enum(['github', 'paper']).describe('Project type'),
+  createdAt: z.date().describe('Project creation date'),
+  authors: z.array(z.string()).describe('Author names'),
+  published: z.boolean().describe('Publication status'),
+
+  // === New Field (001-ai-summary) ===
+  /**
+   * AI-generated summary of the project
+   * - Required field but empty string allowed
+   * - Default: "" (no summary)
+   * - Format: Markdown (optional)
+   * - Display: Hidden when empty/whitespace-only
+   * - Truncation: UI collapses at 300+ characters
+   */
+  aiSummary: z
+    .string()
+    .default('')
+    .describe('AI-generated project summary (markdown supported)'),
+});
+
+/**
+ * Type inference from schema
+ */
+export type Project = z.infer<typeof projectSchema>;
+
+/**
+ * Validation helper: Check if summary has content
+ */
+export function hasValidSummary(summary: string): boolean {
+  return summary.trim().length > 0;
+}
+
+/**
+ * Validation helper: Check if summary should be truncated
+ */
+export function shouldTruncateSummary(summary: string, threshold = 300): boolean {
+  return summary.length > threshold;
+}
+
+/**
+ * Props interface for AISummary component
+ */
+export interface AISummaryProps {
+  summary: string;
+  maxChars?: number;
+}

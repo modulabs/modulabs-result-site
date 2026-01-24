@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>관리자 페이지 - 모두의연구소 LAB</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            DEFAULT: '#4D5EF7',
+                            50: '#eef2ff',
+                            100: '#e0e7ff',
+                            200: '#c7d2fe',
+                            300: '#a5b4fc',
+                            400: '#818cf8',
+                            500: '#4D5EF7',
+                            600: '#4338ca',
+                            700: '#3730a3',
+                            800: '#312e81',
+                            900: '#1e1b4b',
+                        },
+                        accent: {
+                            DEFAULT: '#F7585C',
+                            50: '#fef2f2',
+                            100: '#fee2e2',
+                            200: '#fecaca',
+                            300: '#fca5a5',
+                            400: '#f87171',
+                            500: '#F7585C',
+                            600: '#dc2626',
+                            700: '#b91c1c',
+                            800: '#991b1b',
+                            900: '#7f1d1d',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { font-family: 'Noto Sans KR', sans-serif; }
+        .modal-overlay { backdrop-filter: blur(4px); }
+
+        /* Tab styles */
+        .tab-active {
+            border-color: #4D5EF7;
+            color: #4D5EF7;
+        }
+
+        /* Source type card */
+        .source-card {
+            transition: all 0.3s ease;
+        }
+        .source-card:hover {
+            transform: translateY(-2px);
+        }
+        .source-card.selected {
+            border-color: #4D5EF7;
+            background: linear-gradient(135deg, rgba(77, 94, 247, 0.05) 0%, rgba(247, 88, 92, 0.05) 100%);
+        }
+
+        /* Loading animation */
+        @keyframes pulse-border {
+            0%, 100% { border-color: #4D5EF7; }
+            50% { border-color: #F7585C; }
+        }
+        .generating {
+            animation: pulse-border 1.5s ease-in-out infinite;
+        }
+
+        /* Typing animation */
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+        .cursor::after {
+            content: '|';
+            animation: blink 1s infinite;
+        }
+
+        /* Progress bar */
+        @keyframes progress {
+            0% { width: 0%; }
+            100% { width: 100%; }
+        }
+        .progress-bar {
+            animation: progress 3s ease-in-out forwards;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 min-h-screen">
+
+    <div class="flex min-h-screen">
+        <!-- Sidebar -->
+        <aside class="w-64 bg-gray-900 dark:bg-black text-white flex-shrink-0">
+            <div class="p-6">
+                <div class="flex items-center gap-3 mb-8">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <span class="font-bold text-lg">모두의연구소</span>
+                        <span class="text-xs text-gray-400 block">LAB Admin</span>
+                    </div>
+                </div>
+
+                <nav class="space-y-2">
+                    <a href="#" onclick="showTab('projects')" class="flex items-center gap-3 px-4 py-3 rounded-xl text-gray-400 hover:bg-gray-800 hover:text-white transition-colors" id="nav-projects">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                        </svg>
+                        프로젝트 관리
+                    </a>
+                    <a href="#" onclick="showTab('subpages')" class="flex items-center gap-3 px-4 py-3 rounded-xl bg-primary/20 text-primary border border-primary/30" id="nav-subpages">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        서브 페이지 생성
+                        <span class="ml-auto px-2 py-0.5 text-xs bg-gradient-to-r from-primary to-accent text-white rounded-full">AI</span>
+                    </a>
+                    <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-xl text-gray-400 hover:bg-gray-800 hover:text-white transition-colors">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                        </svg>
+                        통계
+                    </a>
+                    <a href="#" class="flex items-center gap-3 px-4 py-3 rounded-xl text-gray-400 hover:bg-gray-800 hover:text-white transition-colors">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        설정
+                    </a>
+                </nav>
+            </div>
+
+            <div class="mt-auto p-6 border-t border-gray-800">
+                <a href="design-prototype.html" class="flex items-center gap-3 px-4 py-3 rounded-xl text-gray-400 hover:bg-gray-800 hover:text-white transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                    </svg>
+                    사이트로 돌아가기
+                </a>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="flex-1 p-8">
+            <!-- Projects Management Tab -->
+            <div id="tab-projects">
+                <div class="flex items-center justify-between mb-8">
+                    <div>
+                        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">프로젝트 관리</h1>
+                        <p class="text-gray-500 dark:text-gray-400">총 <span id="projectCount">6</span>개의 프로젝트</p>
+                    </div>
+                    <button onclick="showTab('subpages')" class="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-primary to-accent text-white rounded-xl font-medium hover:opacity-90 transition-opacity">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                        </svg>
+                        새 프로젝트
+                    </button>
+                </div>
+
+                <!-- Projects Table -->
+                <div class="bg-white dark:bg-gray-800 rounded-2xl overflow-hidden">
+                    <table class="w-full">
+                        <thead class="bg-gray-50 dark:bg-gray-700/50">
+                            <tr>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">프로젝트</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">타입</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">상태</th>
+                                <th class="px-6 py-4 text-right text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">관리</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+                            <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                                <td class="px-6 py-4">
+                                    <div class="flex items-center gap-3">
+                                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center">
+                                            <svg class="w-5 h-5 text-primary" fill="currentColor" viewBox="0 0 24 24">
+                                                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-.536-.734-1.334-1.334-1.334-.886 0-1.65.715-1.65 1.65v3.315c0 .316.192.688.793.577 4.765-1.587 8.207-6.085 8.207-11.386 0-6.627-5.373-12-12-12z"/>
+                                            </svg>
+                                        </div>
+                                        <div>
+                                            <p class="font-medium text-gray-900 dark:text-white">딥러닝을 활용한 이미지 분류 모델</p>
+                                            <p class="text-sm text-gray-500">deep-learning-image-classification</p>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-4">
+                                    <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium bg-gray-900 text-white">GitHub</span>
+                                </td>
+                                <td class="px-6 py-4">
+                                    <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400">
+                                        <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+                                        공개
+                                    </span>
+                                </td>
+                                <td class="px-6 py-4 text-right">
+                                    <button class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 hover:text-primary">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                        </svg>
+                                    </button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Subpage Generation Tab -->
+            <div id="tab-subpages" class="hidden">
+                <div class="mb-8">
+                    <h1 class="text-2xl font-bold text-gray-900 dark:text-white mb-2">AI 서브 페이지 생성</h1>
+                    <p class="text-gray-500 dark:text-gray-400">Gemini API를 활용하여 PDF, GitHub, YouTube에서 프로젝트 페이지 자동 생성</p>
+                </div>
+
+                <!-- Source Type Selection -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <!-- PDF Source -->
+                    <div class="source-card bg-white dark:bg-gray-800 rounded-2xl p-6 border-2 border-transparent cursor-pointer" onclick="selectSource('pdf')" id="source-pdf">
+                        <div class="flex items-center gap-4 mb-4">
+                            <div class="w-14 h-14 rounded-2xl bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+                                <svg class="w-7 h-7 text-red-500" fill="currentColor" viewBox="0 0 24 24">
+                                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
+                                    <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" stroke="currentColor" stroke-width="2" fill="none" />
+                                </svg>
+                            </div>
+                            <div class="flex-1">
+                                <h3 class="font-bold text-gray-900 dark:text-white">PDF 논문</h3>
+                                <p class="text-sm text-gray-500">arXiv 또는 PDF 파일</p>
+                            </div>
+                            <div class="w-5 h-5 rounded-full border-2 border-gray-300 dark:border-gray-600 source-check"></div>
+                        </div>
+                        <p class="text-sm text-gray-500 dark:text-gray-400">논문 PDF를 업로드하거나 arXiv URL을 입력하면 AI가 자동으로 요약하고 페이지를 생성합니다.</p>
+                    </div>
+
+                    <!-- GitHub Source -->
+                    <div class="source-card bg-white dark:bg-gray-800 rounded-2xl p-6 border-2 border-transparent cursor-pointer" onclick="selectSource('github')" id="source-github">
+                        <div class="flex items-center gap-4 mb-4">
+                            <div class="w-14 h-14 rounded-2xl bg-gray-100 dark:bg-gray-700 flex items-center justify-center">
+                                <svg class="w-7 h-7 text-gray-900 dark:text-white" fill="currentColor" viewBox="0 0 24 24">
+                                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-.536-.734-1.334-1.334-1.334-.886 0-1.65.715-1.65 1.65v3.315c0 .316.192.688.793.577 4.765-1.587 8.207-6.085 8.207-11.386 0-6.627-5.373-12-12-12z"/>
+                                </svg>
+                            </div>
+                            <div class="flex-1">
+                                <h3 class="font-bold text-gray-900 dark:text-white">GitHub 저장소</h3>
+                                <p class="text-sm text-gray-500">오픈소스 프로젝트</p>
+                            </div>
+                            <div class="w-5 h-5 rounded-full border-2 border-gray-300 dark:border-gray-600 source-check"></div>
+                        </div>
+                        <p class="text-sm text-gray-500 dark:text-gray-400">GitHub 저장소 URL을 입력하면 README, 코드 구조를 분석하여 페이지를 생성합니다.</p>
+                    </div>
+
+                    <!-- YouTube Source -->
+                    <div class="source-card bg-white dark:bg-gray-800 rounded-2xl p-6 border-2 border-transparent cursor-pointer" onclick="selectSource('youtube')" id="source-youtube">
+                        <div class="flex items-center gap-4 mb-4">
+                            <div class="w-14 h-14 rounded-2xl bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
+                                <svg class="w-7 h-7 text-red-500" fill="currentColor" viewBox="0 0 24 24">
+                                    <path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505a3.017 3.017 0 00-2.122 2.136C0 8.264 0 12 0 12s0 3.736.501 5.614a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.736 24 12 24 12s0-3.736-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+                                </svg>
+                            </div>
+                            <div class="flex-1">
+                                <h3 class="font-bold text-gray-900 dark:text-white">YouTube 영상</h3>
+                                <p class="text-sm text-gray-500">프로젝트 소개 영상</p>
+                            </div>
+                            <div class="w-5 h-5 rounded-full border-2 border-gray-300 dark:border-gray-600 source-check"></div>
+                        </div>
+                        <p class="text-sm text-gray-500 dark:text-gray-400">YouTube 영상 URL을 입력하면 자동 생성된 자막과 영상 정보로 페이지를 만듭니다.</p>
+                    </div>
+                </div>
+
+                <!-- Input Form -->
+                <div class="bg-white dark:bg-gray-800 rounded-2xl p-6 mb-8">
+                    <h2 class="text-lg font-bold text-gray-900 dark:text-white mb-6">소스 정보 입력</h2>
+
+                    <!-- URL Input -->
+                    <div id="url-input-section" class="mb-6">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2" id="url-label">PDF URL 또는 파일</label>
+                        <div class="flex gap-4">
+                            <input type="text" id="sourceUrl" placeholder="https://arxiv.org/abs/..." class="flex-1 px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary focus:border-transparent outline-none">
+                            <button class="px-6 py-3 rounded-xl bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 font-medium hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors">
+                                파일 업로드
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Project ID -->
+                    <div class="mb-6">
+                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">프로젝트 ID *</label>
+                        <input type="text" id="newProjectId" placeholder="예: my-research-project" class="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary focus:border-transparent outline-none">
+                        <p class="mt-1 text-xs text-gray-500">URL에 사용될 영문 ID입니다 (소문자, 하이픈만 가능)</p>
+                    </div>
+
+                    <!-- Additional Info -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">저자 (선택)</label>
+                            <input type="text" id="projectAuthors" placeholder="홍길동, 김철수" class="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary focus:border-transparent outline-none">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">발표처/저널 (선택)</label>
+                            <input type="text" id="projectVenue" placeholder="CVPR 2025" class="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary focus:border-transparent outline-none">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Generate Button -->
+                <div class="flex justify-center">
+                    <button onclick="generatePage()" id="generateBtn" class="flex items-center gap-3 px-12 py-4 bg-gradient-to-r from-primary to-accent text-white rounded-2xl font-bold text-lg hover:opacity-90 transition-all hover:shadow-lg hover:shadow-primary/25">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                        AI로 페이지 생성하기
+                    </button>
+                </div>
+
+                <!-- Generation Progress -->
+                <div id="generation-progress" class="hidden mt-8">
+                    <div class="bg-white dark:bg-gray-800 rounded-2xl p-6 generating border-2">
+                        <div class="flex items-center gap-4 mb-4">
+                            <div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary to-accent flex items-center justify-center">
+                                <svg class="w-5 h-5 text-white animate-spin" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                            </div>
+                            <div class="flex-1">
+                                <h3 class="font-bold text-gray-900 dark:text-white">AI가 페이지를 생성 중입니다...</h3>
+                                <p class="text-sm text-gray-500" id="generation-status">소스를 분석하고 있습니다</p>
+                            </div>
+                        </div>
+                        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 mb-4">
+                            <div class="progress-bar h-2 rounded-full bg-gradient-to-r from-primary to-accent"></div>
+                        </div>
+                        <div class="bg-gray-50 dark:bg-gray-700/50 rounded-xl p-4">
+                            <p id="generation-log" class="text-sm text-gray-600 dark:text-gray-400 cursor"></p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Generated Result -->
+                <div id="generation-result" class="hidden mt-8">
+                    <div class="bg-white dark:bg-gray-800 rounded-2xl overflow-hidden">
+                        <div class="p-6 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                            <div class="flex items-center gap-3">
+                                <div class="w-10 h-10 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center">
+                                    <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                </div>
+                                <div>
+                                    <h3 class="font-bold text-gray-900 dark:text-white">페이지 생성 완료!</h3>
+                                    <p class="text-sm text-gray-500">AI가 프로젝트 페이지를 생성했습니다</p>
+                                </div>
+                            </div>
+                            <div class="flex gap-3">
+                                <button onclick="previewPage()" class="px-4 py-2 rounded-xl border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 font-medium hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+                                    미리보기
+                                </button>
+                                <button onclick="saveAndPublish()" class="px-4 py-2 rounded-xl bg-gradient-to-r from-primary to-accent text-white font-medium hover:opacity-90 transition-opacity">
+                                    저장하고 게시
+                                </button>
+                            </div>
+                        </div>
+                        <div class="p-6">
+                            <!-- Generated Content Preview -->
+                            <div class="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
+                                <div class="bg-gray-50 dark:bg-gray-700/50 px-4 py-2 border-b border-gray-200 dark:border-gray-700">
+                                    <span class="text-sm font-medium text-gray-500 dark:text-gray-400">생성된 미리보기</span>
+                                </div>
+                                <div id="generated-preview" class="p-6 max-h-96 overflow-y-auto">
+                                    <!-- Generated content will be inserted here -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- API Key Notice -->
+                <div class="mt-8 p-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+                    <div class="flex items-start gap-3">
+                        <svg class="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        <div>
+                            <p class="font-medium text-amber-800 dark:text-amber-200">Gemini API Key 필요</p>
+                            <p class="text-sm text-amber-700 dark:text-amber-300 mt-1">AI 페이지 생성 기능을 사용하려면 Google Gemini API Key가 필요합니다. 설정에서 API Key를 입력해주세요.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Preview Modal -->
+    <div id="previewModal" class="fixed inset-0 z-50 hidden">
+        <div class="modal-overlay absolute inset-0 bg-black/50" onclick="closePreviewModal()"></div>
+        <div class="absolute inset-4 md:inset-10 bg-white dark:bg-gray-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            <div class="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                <h3 class="font-bold text-gray-900 dark:text-white">페이지 미리보기</h3>
+                <button onclick="closePreviewModal()" class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            <iframe id="previewFrame" class="flex-1 w-full" src="about:blank"></iframe>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-6 right-6 transform translate-y-20 opacity-0 transition-all duration-300 z-50">
+        <div class="flex items-center gap-3 px-6 py-4 bg-gray-900 dark:bg-white text-white dark:text-gray-900 rounded-xl shadow-lg">
+            <svg id="toastIcon" class="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+            </svg>
+            <span id="toastMessage">저장되었습니다</span>
+        </div>
+    </div>
+
+    <script>
+        let selectedSource = 'pdf';
+        let generatedData = null;
+
+        // Tab switching
+        function showTab(tabName) {
+            document.getElementById('tab-projects').classList.add('hidden');
+            document.getElementById('tab-subpages').classList.add('hidden');
+            document.getElementById('nav-projects').classList.remove('bg-primary/20', 'text-primary', 'border', 'border-primary/30');
+            document.getElementById('nav-projects').classList.add('text-gray-400');
+            document.getElementById('nav-subpages').classList.remove('bg-primary/20', 'text-primary', 'border', 'border-primary/30');
+            document.getElementById('nav-subpages').classList.add('text-gray-400');
+
+            if (tabName === 'projects') {
+                document.getElementById('tab-projects').classList.remove('hidden');
+                document.getElementById('nav-projects').classList.add('bg-primary/20', 'text-primary', 'border', 'border-primary/30');
+                document.getElementById('nav-projects').classList.remove('text-gray-400');
+            } else if (tabName === 'subpages') {
+                document.getElementById('tab-subpages').classList.remove('hidden');
+                document.getElementById('nav-subpages').classList.add('bg-primary/20', 'text-primary', 'border', 'border-primary/30');
+                document.getElementById('nav-subpages').classList.remove('text-gray-400');
+            }
+        }
+
+        // Source type selection
+        function selectSource(source) {
+            selectedSource = source;
+
+            // Update cards
+            document.querySelectorAll('.source-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            document.getElementById('source-' + source).classList.add('selected');
+
+            // Update checks
+            document.querySelectorAll('.source-check').forEach(check => {
+                check.innerHTML = '';
+                check.classList.remove('bg-primary', 'border-primary');
+            });
+            const selectedCheck = document.querySelector('#source-' + source + ' .source-check');
+            selectedCheck.innerHTML = '<svg class="w-3 h-3 text-primary" fill="currentColor" viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 4l-1.41-1.41L9 16.17z"/></svg>';
+
+            // Update label
+            const labels = {
+                'pdf': 'PDF URL 또는 파일',
+                'github': 'GitHub 저장소 URL',
+                'youtube': 'YouTube 영상 URL'
+            };
+            const placeholders = {
+                'pdf': 'https://arxiv.org/abs/2401.xxxxx 또는 PDF 파일 업로드',
+                'github': 'https://github.com/username/repo',
+                'youtube': 'https://www.youtube.com/watch?v=...'
+            };
+            document.getElementById('url-label').textContent = labels[source];
+            document.getElementById('sourceUrl').placeholder = placeholders[source];
+        }
+
+        // Simulated AI generation
+        async function generatePage() {
+            const projectId = document.getElementById('newProjectId').value;
+            const sourceUrl = document.getElementById('sourceUrl').value;
+
+            if (!projectId) {
+                showToast('프로젝트 ID를 입력해주세요', 'error');
+                return;
+            }
+
+            if (!sourceUrl) {
+                showToast('소스 URL을 입력해주세요', 'error');
+                return;
+            }
+
+            // Show progress
+            document.getElementById('generation-progress').classList.remove('hidden');
+            document.getElementById('generateBtn').disabled = true;
+            document.getElementById('generateBtn').classList.add('opacity-50');
+            document.getElementById('generation-result').classList.add('hidden');
+
+            // Simulated generation steps
+            const steps = [
+                { text: '소스를 분석하고 있습니다...', delay: 500 },
+                { text: '콘텐츠를 추출 중입니다...', delay: 1500 },
+                { text: 'Gemini AI가 요약을 생성 중입니다...', delay: 2500 },
+                { text: '페이지 구조를 만드는 중입니다...', delay: 3500 },
+                { text: '마무리 작업 중...', delay: 4500 }
+            ];
+
+            for (const step of steps) {
+                await new Promise(resolve => setTimeout(resolve, step.delay - (steps[steps.indexOf(step) - 1]?.delay || 0)));
+                document.getElementById('generation-status').textContent = step.text;
+                document.getElementById('generation-log').textContent += step.text + '\n';
+            }
+
+            // Generate mock data
+            generatedData = generateMockData(projectId, sourceUrl);
+
+            // Show result
+            setTimeout(() => {
+                document.getElementById('generation-progress').classList.add('hidden');
+                document.getElementById('generation-result').classList.remove('hidden');
+                document.getElementById('generateBtn').disabled = false;
+                document.getElementById('generateBtn').classList.remove('opacity-50');
+                document.getElementById('generation-log').textContent = '';
+
+                // Show preview
+                document.getElementById('generated-preview').innerHTML = generatedData.preview;
+                showToast('페이지 생성 완료!');
+            }, 500);
+        }
+
+        function generateMockData(projectId, sourceUrl) {
+            const titles = {
+                'pdf': '딥러닝 기반 다중 모달 이해 연구',
+                'github': '분산 시스템 모니터링 프레임워크',
+                'youtube': '컴퓨터 비전을 위한 새로운 접근법'
+            };
+
+            return {
+                projectId: projectId,
+                title: titles[selectedSource] || 'AI 생성 프로젝트',
+                preview: `
+                    <div class="space-y-6">
+                        <div class="text-center">
+                            <h1 class="text-3xl font-bold text-gray-900 dark:text-white mb-2">${titles[selectedSource] || 'AI 생성 프로젝트'}</h1>
+                            <div class="flex items-center justify-center gap-4 text-sm text-gray-500">
+                                <span>${document.getElementById('projectAuthors').value || '연구자'}</span>
+                                <span>•</span>
+                                <span>${document.getElementById('projectVenue').value || '2024'}</span>
+                            </div>
+                        </div>
+
+                        <!-- AI Summary -->
+                        <div class="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 rounded-r-lg p-6">
+                            <div class="flex items-center gap-2 mb-3">
+                                <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                </svg>
+                                <h2 class="text-lg font-semibold">AI 요약</h2>
+                            </div>
+                            <p class="text-gray-700 dark:text-gray-300 leading-relaxed">
+                                Gemini AI가 ${sourceUrl}을(를) 분석한 결과, 이 프로젝트는 ${selectedSource === 'pdf' ? '딥러닝과 컴퓨터 비전 분야의 최신 연구 결과를 담고 있습니다.' : selectedSource === 'github' ? '오픈소스 생태계에 기여하는 실용적인 도구를 제공합니다.' : '시각적 이해와 멀티모달 학습에 대한 혁신적인 접근법을 제시합니다.'}
+                                주요 기여로는 새로운 아키텍처 설계, 높은 정확도 달성, 실제 응용 가능성 등이 있습니다.
+                            </p>
+                        </div>
+
+                        <!-- Abstract -->
+                        <div>
+                            <h2 class="text-xl font-bold text-gray-900 dark:text-white mb-3">초록</h2>
+                            <p class="text-gray-600 dark:text-gray-400 leading-relaxed">
+                                이 연구에서는 ${selectedSource === 'pdf' ? '트랜스포머 기반의 멀티모달 학습 방법을 제안합니다.' : selectedSource === 'github' ? '마이크로서비스 아키텍처에서의 효율적인 리소스 관리 방법을 다룹니다.' : '비디오 데이터에서의 효과적인 특징 추출 기법을 소개합니다.'}
+                                실험 결과, 제안하는 방법은 기존 방법론 대비 최대 15% 성능 향상을 보였으며, 실제 환경에서도 우수한 확장성을 보였습니다.
+                            </p>
+                        </div>
+
+                        <!-- Key Features -->
+                        <div>
+                            <h2 class="text-xl font-bold text-gray-900 dark:text-white mb-3">주요 특징</h2>
+                            <ul class="space-y-2 text-gray-600 dark:text-gray-400">
+                                <li class="flex items-start gap-2">
+                                    <svg class="w-5 h-5 text-primary flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                                    새로운 아키텍처 설계로 기존 방법의 한계 극복
+                                </li>
+                                <li class="flex items-start gap-2">
+                                    <svg class="w-5 h-5 text-primary flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                                    대규모 데이터셋에서 검증된 성능
+                                </li>
+                                <li class="flex items-start gap-2">
+                                    <svg class="w-5 h-5 text-primary flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                                    오픈소스 구현으로 재현 가능성 확보
+                                </li>
+                            </ul>
+                        </div>
+
+                        <!-- Source Link -->
+                        <div class="flex items-center gap-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                            <a href="${sourceUrl}" target="_blank" class="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-primary to-accent text-white rounded-xl font-medium hover:opacity-90">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                                원본 보기
+                            </a>
+                        </div>
+                    </div>
+                `
+            };
+        }
+
+        function previewPage() {
+            const previewModal = document.getElementById('previewModal');
+            const previewFrame = document.getElementById('previewFrame');
+
+            // Create preview HTML
+            const previewHTML = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <script src="https://cdn.tailwindcss.com"></script>
+                    <script>
+                        tailwind.config = {
+                            darkMode: 'class',
+                            theme: {
+                                extend: {
+                                    colors: { primary: { DEFAULT: '#4D5EF7' }, accent: { DEFAULT: '#F7585C' } }
+                                }
+                            }
+                        }
+                    </script>
+                    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+                    <style>* { font-family: 'Noto Sans KR', sans-serif; }</style>
+                </head>
+                <body class="bg-gray-50 dark:bg-gray-900 p-8">
+                    ${generatedData.preview}
+                </body>
+                </html>
+            `;
+
+            previewFrame.srcdoc = previewHTML;
+            previewModal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closePreviewModal() {
+            document.getElementById('previewModal').classList.add('hidden');
+            document.body.style.overflow = '';
+        }
+
+        function saveAndPublish() {
+            showToast('저장되었습니다. 프로젝트 목록에 추가되었습니다.');
+            // Reset form
+            document.getElementById('newProjectId').value = '';
+            document.getElementById('sourceUrl').value = '';
+            document.getElementById('projectAuthors').value = '';
+            document.getElementById('projectVenue').value = '';
+            document.getElementById('generation-result').classList.add('hidden');
+            showTab('projects');
+        }
+
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            const toastMessage = document.getElementById('toastMessage');
+            const toastIcon = document.getElementById('toastIcon');
+
+            toastMessage.textContent = message;
+
+            if (type === 'error') {
+                toastIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />';
+                toastIcon.classList.remove('text-green-400');
+                toastIcon.classList.add('text-red-400');
+            } else {
+                toastIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />';
+                toastIcon.classList.remove('text-red-400');
+                toastIcon.classList.add('text-green-400');
+            }
+
+            toast.classList.remove('translate-y-20', 'opacity-0');
+            toast.classList.add('translate-y-0', 'opacity-100');
+
+            setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0');
+                toast.classList.remove('translate-y-0', 'opacity-100');
+            }, 3000);
+        }
+
+        // Initialize
+        selectSource('pdf');
+
+        // Dark mode
+        if (localStorage.getItem('darkMode') === 'true' ||
+            (!localStorage.getItem('darkMode') && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('dark');
+        }
+    </script>
+</body>
+</html>
