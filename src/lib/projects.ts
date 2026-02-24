@@ -1,13 +1,30 @@
 import fs from 'fs';
 import path from 'path';
 import matter from 'gray-matter';
-import { ProjectSchema, type Project } from './types';
+import { ProjectSchema, type Author, type Project } from './types';
 
 export { ProjectSchema, type Project };
 
 const projectsDirectory = path.join(process.cwd(), 'src/content/projects');
 
 // ... (existing imports)
+
+function normalizeFrontmatterNulls(value: unknown): unknown {
+  if (value === null) {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    return value.map(normalizeFrontmatterNulls);
+  }
+  if (typeof value === 'object' && value !== null) {
+    const normalizedEntries = Object.entries(value).map(([key, innerValue]) => [
+      key,
+      normalizeFrontmatterNulls(innerValue),
+    ]);
+    return Object.fromEntries(normalizedEntries);
+  }
+  return value;
+}
 
 export async function getAllProjects(): Promise<Project[]> {
   // Ensure directory exists
@@ -21,19 +38,26 @@ export async function getAllProjects(): Promise<Project[]> {
     .map(fileName => {
       const id = fileName.replace(/\.md$/, '');
       const fullPath = path.join(projectsDirectory, fileName);
-      const fileContents = fs.readFileSync(fullPath, 'utf8');
-      const { data } = matter(fileContents);
+      try {
+        const fileContents = fs.readFileSync(fullPath, 'utf8');
+        const { data } = matter(fileContents);
 
-      return {
-        id,
-        ...data,
-      };
+        return {
+          id,
+          ...data,
+        };
+      } catch (error) {
+        console.error(`Failed to parse frontmatter for project ${id}:`, error);
+        return null;
+      }
     });
 
   // Validate all projects
   const validatedProjects = allProjectsData
+    .filter((project): project is NonNullable<typeof project> => project !== null)
     .map(project => {
-      const result = ProjectSchema.safeParse(project);
+      const normalizedProject = normalizeFrontmatterNulls(project);
+      const result = ProjectSchema.safeParse(normalizedProject);
       if (result.success) {
         return result.data;
       }
@@ -60,20 +84,27 @@ export async function getAllProjectsForAdmin(): Promise<Project[]> {
     .map(fileName => {
       const id = fileName.replace(/\.md$/, '');
       const fullPath = path.join(projectsDirectory, fileName);
-      const fileContents = fs.readFileSync(fullPath, 'utf8');
-      const { data } = matter(fileContents);
+      try {
+        const fileContents = fs.readFileSync(fullPath, 'utf8');
+        const { data } = matter(fileContents);
 
-      // Default to false if published is missing, but schema should handle it
-      return {
-        id,
-        ...data,
-      };
+        // Default to false if published is missing, but schema should handle it
+        return {
+          id,
+          ...data,
+        };
+      } catch (error) {
+        console.error(`Failed to parse frontmatter for project ${id}:`, error);
+        return null;
+      }
     });
 
   // Validate all projects
   const validatedProjects = allProjectsData
+    .filter((project): project is NonNullable<typeof project> => project !== null)
     .map(project => {
-      const result = ProjectSchema.safeParse(project);
+      const normalizedProject = normalizeFrontmatterNulls(project);
+      const result = ProjectSchema.safeParse(normalizedProject);
       if (result.success) {
         return result.data;
       }
@@ -87,7 +118,16 @@ export async function getAllProjectsForAdmin(): Promise<Project[]> {
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 }
 
-import { saveFileToGitHub } from './github';
+import { deleteFileFromGitHub, saveFileToGitHub } from './github';
+
+export type CreateProjectStorage = 'github' | 'local' | 'local-fallback';
+
+export interface CreateProjectResult {
+  success: boolean;
+  storage?: CreateProjectStorage;
+  warning?: string;
+  error?: string;
+}
 
 export async function updateProjectMetadata(id: string, updates: { published?: boolean; type?: 'github' | 'paper' | 'video' }): Promise<boolean> {
   try {
@@ -121,7 +161,14 @@ export async function updateProjectMetadata(id: string, updates: { published?: b
     // Use GitHub API if configured (Production / Vercel)
     if (process.env.GITHUB_TOKEN) {
       const relativePath = `src/content/projects/${id}.md`;
-      return await saveFileToGitHub(relativePath, newContent, `Update metadata for ${id}`);
+      const success = await saveFileToGitHub(relativePath, newContent, `Update metadata for ${id}`);
+
+      // Sync local file in development mode
+      if (success && process.env.NODE_ENV === 'development') {
+        fs.writeFileSync(fullPath, newContent, 'utf8');
+      }
+
+      return success;
     } else {
       // Fallback to local fs (Local Dev)
       fs.writeFileSync(fullPath, newContent, 'utf8');
@@ -129,6 +176,96 @@ export async function updateProjectMetadata(id: string, updates: { published?: b
     }
   } catch (error) {
     console.error(`Error updating project metadata for ${id}:`, error);
+    return false;
+  }
+}
+
+export async function createProject(id: string, content: string): Promise<CreateProjectResult> {
+  try {
+    const fullPath = path.join(projectsDirectory, `${id}.md`);
+    if (!fs.existsSync(projectsDirectory)) {
+      fs.mkdirSync(projectsDirectory, { recursive: true });
+    }
+
+    // 1. GitHub API (Production/Vercel)
+    if (process.env.GITHUB_TOKEN) {
+      const relativePath = `src/content/projects/${id}.md`;
+      const success = await saveFileToGitHub(relativePath, content, `Create project: ${id}`);
+
+      // Sync local file in development mode
+      if (success && process.env.NODE_ENV === 'development') {
+        fs.writeFileSync(fullPath, content, 'utf8');
+      }
+
+      if (success) {
+        return { success: true, storage: 'github' };
+      }
+
+      if (process.env.NODE_ENV === 'development') {
+        fs.writeFileSync(fullPath, content, 'utf8');
+        return {
+          success: true,
+          storage: 'local-fallback',
+          warning: 'GitHub 저장에 실패하여 로컬 저장소로 폴백했습니다.'
+        };
+      }
+
+      return {
+        success: false,
+        error:
+          'GitHub 저장에 실패했습니다. GITHUB_TOKEN/GITHUB_OWNER/GITHUB_REPO 설정 및 토큰 권한(contents:write)을 확인해주세요.'
+      };
+    }
+
+    // 2. Local Filesystem (Local Dev)
+    // Check if file exists to prevent accidental overwrite (optional constraint)
+    if (fs.existsSync(fullPath)) {
+      // For now, let's allow overwrite or maybe throw error? 
+      // Admin UI usually implies 'Save' is final. Let's overwrite.
+    }
+
+    fs.writeFileSync(fullPath, content, 'utf8');
+    return { success: true, storage: 'local' };
+
+  } catch (error) {
+    console.error(`Error creating project ${id}:`, error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : '프로젝트 생성 중 알 수 없는 오류가 발생했습니다.'
+    };
+  }
+}
+
+export async function deleteProject(id: string): Promise<boolean> {
+  try {
+    const fullPath = path.join(projectsDirectory, `${id}.md`);
+
+    // 1. GitHub API (Production/Vercel)
+    if (process.env.GITHUB_TOKEN) {
+      const relativePath = `src/content/projects/${id}.md`;
+      const success = await deleteFileFromGitHub(relativePath, `Delete project: ${id}`);
+
+      if (!success) {
+        return false;
+      }
+
+      // Sync local file in development mode
+      if (process.env.NODE_ENV === 'development' && fs.existsSync(fullPath)) {
+        fs.unlinkSync(fullPath);
+      }
+
+      return true;
+    }
+
+    // 2. Local Filesystem (Local Dev)
+    if (!fs.existsSync(fullPath)) {
+      return false;
+    }
+
+    fs.unlinkSync(fullPath);
+    return true;
+  } catch (error) {
+    console.error(`Error deleting project ${id}:`, error);
     return false;
   }
 }
@@ -150,6 +287,47 @@ function extractList(content: string, sectionTitle: string): string[] {
     .split('\n')
     .filter(line => line.trim().startsWith('-'))
     .map(line => line.trim().replace(/^-\s*/, ''));
+}
+
+function normalizeProjectAuthors(rawAuthors: unknown): Author[] {
+  if (!Array.isArray(rawAuthors)) {
+    return [];
+  }
+
+  const normalized: Author[] = [];
+  for (const rawAuthor of rawAuthors) {
+    if (typeof rawAuthor === 'string') {
+      const name = rawAuthor.trim();
+      if (name) {
+        normalized.push({ name });
+      }
+      continue;
+    }
+
+    if (typeof rawAuthor !== 'object' || rawAuthor === null) {
+      continue;
+    }
+
+    const record = rawAuthor as Record<string, unknown>;
+    const name = typeof record.name === 'string' ? record.name.trim() : '';
+    if (!name) {
+      continue;
+    }
+
+    const author: Author = { name };
+    if (typeof record.url === 'string' && record.url.trim()) {
+      author.url = record.url.trim();
+    }
+    if (typeof record.affiliation === 'string' && record.affiliation.trim()) {
+      author.affiliation = record.affiliation.trim();
+    }
+    if (typeof record.equalContribution === 'boolean') {
+      author.equalContribution = record.equalContribution;
+    }
+    normalized.push(author);
+  }
+
+  return normalized;
 }
 
 export async function getProjectById(id: string): Promise<Project | null> {
@@ -182,12 +360,11 @@ export async function getProjectById(id: string): Promise<Project | null> {
       });
     }
 
-    // Normalize authors to object array if they are strings
-    const authors = Array.isArray(data.authors)
-      ? data.authors.map((author: string | { name: string }) =>
-        typeof author === 'string' ? { name: author } : author
-      )
-      : [];
+    const authorsDetailed = normalizeProjectAuthors(
+      (data as { authorsDetailed?: unknown }).authorsDetailed
+    );
+    const authorsFromLegacyField = normalizeProjectAuthors(data.authors);
+    const authors = authorsDetailed.length > 0 ? authorsDetailed : authorsFromLegacyField;
 
     const projectData = {
       id,

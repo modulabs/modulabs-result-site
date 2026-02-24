@@ -5,6 +5,20 @@
 
 import { z } from 'zod';
 
+const optionalStringField = z.preprocess(
+  (value) => {
+    if (value === null || value === undefined) {
+      return undefined;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    }
+    return value;
+  },
+  z.string().optional()
+);
+
 // ============================================================================
 // Base Types
 // ============================================================================
@@ -80,17 +94,17 @@ export const ProjectSchema = z.object({
   published: z.boolean(),
   aiSummary: z.string().default(''),
   year: z.coerce.string().default(''),
-  venue: z.string().optional(),
-  institution: z.string().optional(),
+  venue: optionalStringField,
+  institution: optionalStringField,
   // Optional fields
-  githubUrl: z.string().optional(),
-  arxivUrl: z.string().optional(),
-  pdfUrl: z.string().optional(),
-  videoUrl: z.string().optional(),
-  youtubeVideoId: z.string().optional(),
+  githubUrl: optionalStringField,
+  arxivUrl: optionalStringField,
+  pdfUrl: optionalStringField,
+  videoUrl: optionalStringField,
+  youtubeVideoId: optionalStringField,
   images: z.array(z.string()).optional(),
   tags: z.array(z.string()).optional(),
-  bibtex: z.string().optional(),
+  bibtex: optionalStringField,
 });
 
 export type Project = z.infer<typeof ProjectSchema>;

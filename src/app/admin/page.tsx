@@ -60,6 +60,194 @@ interface GeneratedData {
   }>;
 }
 
+type BulkJobStatus = 'queued' | 'running' | 'success' | 'failed';
+
+interface BulkJob {
+  sourceType: SourceType;
+  sourceUrl: string;
+  projectId: string;
+  authors?: string;
+  institution?: string;
+  venue?: string;
+  researchYear?: string;
+  pdfFileName?: string;
+  status: BulkJobStatus;
+  message?: string;
+  generatedTitle?: string;
+}
+
+const BULK_SAMPLE_CSV = `sourceType,sourceUrl,projectId,authors,institution,venue,researchYear,pdfFileName
+github,https://github.com/vercel/next.js,nextjs-archive,Lee YB,ModuLabs,,2026,
+youtube,https://www.youtube.com/watch?v=dQw4w9WgXcQ,youtube-demo,,,YouTube,2026,
+pdf,,pdf-paper-demo,Kim,ModuLabs,CVPR 2026,2026,sample-paper.pdf`;
+
+function parseCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+
+    if (char === '"') {
+      const next = line[i + 1];
+      if (inQuotes && next === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === ',' && !inQuotes) {
+      result.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  result.push(current.trim());
+  return result;
+}
+
+function normalizeCsvHeader(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s_-]/g, '');
+}
+
+interface ParsedApiResponse {
+  data: unknown;
+  rawText: string;
+  isHtml: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+async function parseApiResponse(response: Response): Promise<ParsedApiResponse> {
+  const rawText = await response.text();
+  let data: unknown = null;
+
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      data = null;
+    }
+  }
+
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  const trimmed = rawText.trim().toLowerCase();
+  const isHtml =
+    contentType.includes('text/html') ||
+    trimmed.startsWith('<!doctype html') ||
+    trimmed.startsWith('<html');
+
+  return { data, rawText, isHtml };
+}
+
+function getApiErrorMessage(
+  fallbackMessage: string,
+  response: Response,
+  parsed: ParsedApiResponse
+): string {
+  if (isRecord(parsed.data) && typeof parsed.data.error === 'string' && parsed.data.error.trim()) {
+    return parsed.data.error;
+  }
+
+  if (parsed.isHtml) {
+    return `${fallbackMessage} (서버가 HTML 응답을 반환했습니다. API 서버 실행 상태를 확인해주세요. HTTP ${response.status})`;
+  }
+
+  return `${fallbackMessage} (HTTP ${response.status})`;
+}
+
+function parseBulkCsv(text: string): { jobs: BulkJob[]; errors: string[] } {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length < 2) {
+    return { jobs: [], errors: ['CSV는 헤더 포함 2줄 이상이어야 합니다.'] };
+  }
+
+  const headers = parseCsvLine(lines[0]).map(normalizeCsvHeader);
+  const headerIndex = new Map(headers.map((header, idx) => [header, idx]));
+
+  const findValue = (row: string[], keys: string[]): string => {
+    for (const key of keys) {
+      const idx = headerIndex.get(key);
+      if (idx !== undefined && idx < row.length) {
+        return row[idx].trim();
+      }
+    }
+    return '';
+  };
+
+  const errors: string[] = [];
+  const jobs: BulkJob[] = [];
+  const seenProjectIds = new Set<string>();
+
+  lines.slice(1).forEach((line, index) => {
+    const rowNumber = index + 2;
+    const columns = parseCsvLine(line);
+
+    const sourceTypeRaw = findValue(columns, ['sourcetype']);
+    const sourceType = sourceTypeRaw.toLowerCase() as SourceType;
+    const sourceUrl = findValue(columns, ['sourceurl', 'url']);
+    const projectId = findValue(columns, ['projectid', 'id']);
+    const authors = findValue(columns, ['authors']);
+    const institution = findValue(columns, ['institution']);
+    const venue = findValue(columns, ['venue']);
+    const researchYear = findValue(columns, ['researchyear', 'year']);
+    const pdfFileName = findValue(columns, ['pdffilename', 'filename', 'file']);
+
+    if (!['pdf', 'github', 'youtube'].includes(sourceType)) {
+      errors.push(`${rowNumber}행: sourceType은 pdf/github/youtube 중 하나여야 합니다.`);
+      return;
+    }
+
+    if (!projectId) {
+      errors.push(`${rowNumber}행: projectId는 필수입니다.`);
+      return;
+    }
+
+    if (seenProjectIds.has(projectId)) {
+      errors.push(`${rowNumber}행: projectId(${projectId})가 중복되었습니다.`);
+      return;
+    }
+    seenProjectIds.add(projectId);
+
+    if (sourceType !== 'pdf' && !sourceUrl) {
+      errors.push(`${rowNumber}행: ${sourceType} 타입은 sourceUrl이 필수입니다.`);
+      return;
+    }
+
+    if (sourceType === 'pdf' && !sourceUrl && !pdfFileName) {
+      errors.push(`${rowNumber}행: pdf 타입은 sourceUrl 또는 pdfFileName이 필요합니다.`);
+      return;
+    }
+
+    jobs.push({
+      sourceType,
+      sourceUrl,
+      projectId,
+      authors: authors || undefined,
+      institution: institution || undefined,
+      venue: venue || undefined,
+      researchYear: researchYear || undefined,
+      pdfFileName: pdfFileName || undefined,
+      status: 'queued',
+    });
+  });
+
+  return { jobs, errors };
+}
+
 export default function AdminPage() {
   const router = useRouter();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -124,16 +312,25 @@ export default function AdminPage() {
         method: 'POST',
         body: formData,
       });
+      const parsed = await parseApiResponse(response);
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || '파일 업로드 실패');
+        throw new Error(getApiErrorMessage('파일 업로드 실패', response, parsed));
       }
 
-      const result = await response.json();
-      const fullUrl = `${window.location.origin}${result.url}`;
+      if (!isRecord(parsed.data) || typeof parsed.data.url !== 'string') {
+        throw new Error('파일 업로드 응답이 JSON 형식이 아닙니다. API 응답을 확인해주세요.');
+      }
+
+      const result = parsed.data;
+      const uploadUrl = result.url as string;
+      const fullUrl =
+        typeof result.url === 'string' &&
+          (result.url.startsWith('http://') || result.url.startsWith('https://'))
+          ? result.url
+          : `${window.location.origin}${result.url}`;
       setUploadedPdfUrl(fullUrl);
-      return fullUrl;
+      return uploadUrl;
     } catch (error: any) {
       throw new Error(error.message || '파일 업로드에 실패했습니다.');
     } finally {
@@ -251,16 +448,25 @@ export default function AdminPage() {
           researchYear: researchYear || new Date().getFullYear().toString(),
         }),
       });
+      const parsed = await parseApiResponse(response);
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || '생성 실패');
+        throw new Error(getApiErrorMessage('생성 실패', response, parsed));
       }
 
-      const result = await response.json();
-      setGeneratedData(result.data);
+      if (!isRecord(parsed.data) || !isRecord(parsed.data.data)) {
+        throw new Error('생성 응답이 JSON 형식이 아니거나 필드가 누락되었습니다.');
+      }
+
+      const resultData = parsed.data.data as unknown as GeneratedData;
+      const resultMessage =
+        typeof parsed.data.message === 'string'
+          ? parsed.data.message
+          : '페이지가 자동으로 생성되어 저장되었습니다!';
+
+      setGeneratedData(resultData);
       setGenerationStatus('');
-      setSuccessMessage(result.message || '페이지가 자동으로 생성되어 저장되었습니다!');
+      setSuccessMessage(resultMessage);
       setTimeout(() => setSuccessMessage(null), 5000);
     } catch (err: any) {
       setError(err.message || '생성 중 오류가 발생했습니다.');
@@ -270,8 +476,8 @@ export default function AdminPage() {
     }
   };
 
-  const handleSaveMarkdown = () => {
-    if (!generatedData) return;
+  const generateMarkdownContent = () => {
+    if (!generatedData) return null;
 
     // Helper function to escape markdown special characters in image alt text
     const escapeMarkdownAlt = (text: string) => {
@@ -332,19 +538,19 @@ export default function AdminPage() {
         })()
         : '';
 
-    const markdown = `---
+    return `---
 id: ${generatedData.projectId}
-title: ${generatedData.title}
-description: ${generatedData.abstract.substring(0, 100)}...
+title: "${generatedData.title.replace(/"/g, '\\"')}"
+description: ${generatedData.abstract.substring(0, 100).replace(/\n/g, ' ')}...
 type: ${selectedSource === 'github' ? 'github' : 'paper'}
-createdAt: ${new Date().toISOString().split('T')[0]}
+createdAt: ${new Date().toISOString()}
 authors: [${generatedData.authors.map((a) => `'${a.name}'`).join(', ')}]
 published: true
 venue: ${generatedData.venue}
 year: ${generatedData.year}
 institution: ${generatedData.institution}
-${selectedSource === 'github' ? `githubUrl: ${sourceUrl}` : ''}
-${selectedSource === 'pdf' ? `arxivUrl: ${sourceUrl}` : ''}
+${selectedSource === 'github' && sourceUrl.trim() ? `githubUrl: ${sourceUrl.trim()}` : ''}
+${selectedSource === 'pdf' && sourceUrl.trim() ? `arxivUrl: ${sourceUrl.trim()}` : ''}
 ${generatedData.youtubeVideoId ? `youtubeVideoId: ${generatedData.youtubeVideoId}` : ''}
 ---
 
@@ -375,6 +581,11 @@ ${generatedData.bibtex ? `## BibTeX\n\n\`\`\`bibtex\n${generatedData.bibtex.code
 
 ${relatedWorksMarkdown ? `## Related Works\n\n${relatedWorksMarkdown}\n` : ''}
 `;
+  };
+
+  const handleSaveMarkdown = () => {
+    const markdown = generateMarkdownContent();
+    if (!markdown || !generatedData) return;
 
     // Download as file
     const blob = new Blob([markdown], { type: 'text/markdown' });
@@ -389,6 +600,50 @@ ${relatedWorksMarkdown ? `## Related Works\n\n${relatedWorksMarkdown}\n` : ''}
 
     setSuccessMessage('마크다운 파일이 다운로드되었습니다!');
     setTimeout(() => setSuccessMessage(null), 3000);
+  };
+
+  const handlePublishToGitHub = async () => {
+    const markdown = generateMarkdownContent();
+    if (!markdown || !generatedData) return;
+
+    setError(null);
+    try {
+      setIsGenerating(true); // Show loading
+      const response = await fetch('/api/projects/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: generatedData.projectId,
+          content: markdown
+        })
+      });
+
+      const parsed = await parseApiResponse(response);
+
+      if (!response.ok) {
+        throw new Error(getApiErrorMessage('프로젝트 게시 실패', response, parsed));
+      }
+
+      const warning =
+        isRecord(parsed.data) && typeof parsed.data.warning === 'string'
+          ? parsed.data.warning
+          : null;
+
+      setSuccessMessage(
+        warning
+          ? `프로젝트가 게시되었습니다. (${warning})`
+          : '프로젝트가 성공적으로 게시되었습니다! (GitHub)'
+      );
+      setTimeout(() => setSuccessMessage(null), 5000);
+
+      // Optional: Clear generated data or redirect?
+      // For now, keep it so user can see it's done.
+    } catch (error) {
+      console.error(error);
+      setError(error instanceof Error ? error.message : '프로젝트 게시 중 오류가 발생했습니다.');
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   return (
@@ -525,6 +780,7 @@ ${relatedWorksMarkdown ? `## Related Works\n\n${relatedWorksMarkdown}\n` : ''}
             generatedData={generatedData}
             setGeneratedData={setGeneratedData}
             onSave={handleSaveMarkdown}
+            onPublish={handlePublishToGitHub}
             error={error}
             setError={setError}
             successMessage={successMessage}
@@ -580,6 +836,7 @@ ${relatedWorksMarkdown ? `## Related Works\n\n${relatedWorksMarkdown}\n` : ''}
 function ProjectsTab() {
   const [projects, setProjects] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -611,15 +868,16 @@ function ProjectsTab() {
       });
 
       if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
         // Revert on failure
         setProjects(prev => prev.map(p => p.id === id ? { ...p, published: currentStatus } : p));
-        alert('상태 업데이트에 실패했습니다.');
+        alert(`상태 업데이트 실패: ${errorData.error || '알 수 없는 오류'} (${res.status})`);
       }
     } catch (error) {
       // Revert on error
       setProjects(prev => prev.map(p => p.id === id ? { ...p, published: currentStatus } : p));
       console.error('Failed to update status', error);
-      alert('오류가 발생했습니다.');
+      alert('네트워크 오류가 발생했습니다.');
     }
   };
 
@@ -643,6 +901,37 @@ function ProjectsTab() {
       fetchProjects();
       console.error('Failed to update type', error);
       alert('오류가 발생했습니다.');
+    }
+  };
+
+  const deleteProjectItem = async (id: string, title: string) => {
+    const confirmed = window.confirm(
+      `"${title}" 프로젝트를 삭제하시겠습니까?\n삭제 후 되돌릴 수 없습니다.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    const previousProjects = projects;
+    setDeletingId(id);
+    setProjects(prev => prev.filter((project) => project.id !== id));
+
+    try {
+      const res = await fetch(`/api/projects/${id}`, {
+        method: 'DELETE',
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        setProjects(previousProjects);
+        alert(`삭제 실패: ${errorData.error || '알 수 없는 오류'} (${res.status})`);
+      }
+    } catch (deleteError) {
+      setProjects(previousProjects);
+      console.error('Failed to delete project', deleteError);
+      alert('네트워크 오류가 발생했습니다.');
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -775,15 +1064,33 @@ function ProjectsTab() {
                     </span>
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <Link
-                      href={`/projects/${project.id}`}
-                      target="_blank"
-                      className="text-gray-400 hover:text-primary transition-colors"
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                      </svg>
-                    </Link>
+                    <div className="inline-flex items-center gap-3">
+                      <Link
+                        href={`/projects/${project.id}`}
+                        target="_blank"
+                        className="text-gray-400 hover:text-primary transition-colors"
+                        title="프로젝트 보기"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                        </svg>
+                      </Link>
+                      <button
+                        onClick={() => deleteProjectItem(project.id, project.title)}
+                        disabled={deletingId === project.id}
+                        className="text-gray-400 hover:text-red-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="프로젝트 삭제"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth="2"
+                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7h6m-7 0V5a1 1 0 011-1h4a1 1 0 011 1v2"
+                          />
+                        </svg>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))
@@ -859,6 +1166,7 @@ interface SubpagesTabProps {
   generatedData: GeneratedData | null;
   setGeneratedData: (data: GeneratedData | null) => void;
   onSave: () => void;
+  onPublish: () => void;
   error: string | null;
   setError: (error: string | null) => void;
   successMessage: string | null;
@@ -898,6 +1206,7 @@ function SubpagesTab({
   generatedData,
   setGeneratedData,
   onSave,
+  onPublish,
   error,
   setError,
   successMessage,
@@ -972,6 +1281,255 @@ function SubpagesTab({
     pdf: 'PDF URL (arXiv)',
     github: 'GitHub 저장소 URL',
     youtube: 'YouTube 영상 URL',
+  };
+
+  const [bulkCsvText, setBulkCsvText] = useState('');
+  const [bulkJobs, setBulkJobs] = useState<BulkJob[]>([]);
+  const [bulkCsvError, setBulkCsvError] = useState<string | null>(null);
+  const [bulkPdfFiles, setBulkPdfFiles] = useState<File[]>([]);
+  const [isBulkRunning, setIsBulkRunning] = useState(false);
+  const [bulkConcurrency, setBulkConcurrency] = useState(2);
+  const [bulkSummary, setBulkSummary] = useState<{
+    total: number;
+    success: number;
+    failed: number;
+  } | null>(null);
+  const bulkStatusCount = bulkJobs.reduce(
+    (acc, job) => {
+      acc[job.status] += 1;
+      return acc;
+    },
+    { queued: 0, running: 0, success: 0, failed: 0 } as Record<BulkJobStatus, number>
+  );
+  const bulkCompletedCount = bulkStatusCount.success + bulkStatusCount.failed;
+  const bulkProgressPercent = bulkJobs.length > 0
+    ? Math.round((bulkCompletedCount / bulkJobs.length) * 100)
+    : 0;
+
+  const updateBulkJob = (projectId: string, patch: Partial<BulkJob>) => {
+    setBulkJobs((prev) =>
+      prev.map((job) => (job.projectId === projectId ? { ...job, ...patch } : job))
+    );
+  };
+
+  const handleParseBulkCsv = () => {
+    const { jobs, errors } = parseBulkCsv(bulkCsvText);
+    if (errors.length > 0) {
+      setBulkCsvError(errors.join('\n'));
+      setBulkJobs([]);
+      setBulkSummary(null);
+      return;
+    }
+
+    setBulkCsvError(null);
+    setBulkJobs(jobs);
+    setBulkSummary(null);
+  };
+
+  const handleBulkCsvFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      setBulkCsvText(text);
+      setBulkCsvError(null);
+    } catch {
+      setBulkCsvError('CSV 파일을 읽는데 실패했습니다.');
+    }
+  };
+
+  const handleDownloadBulkTemplate = () => {
+    const csvWithBom = `\uFEFF${BULK_SAMPLE_CSV}`;
+    const blob = new Blob([csvWithBom], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'bulk-generation-template.csv';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleBulkPdfFilesSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) {
+      setBulkPdfFiles([]);
+      return;
+    }
+
+    const validFiles = files.filter(
+      (file) => file.type === 'application/pdf' && file.size <= 10 * 1024 * 1024
+    );
+
+    if (validFiles.length !== files.length) {
+      setBulkCsvError('일부 파일은 PDF가 아니거나 10MB를 초과하여 제외되었습니다.');
+    }
+
+    const deduplicatedByName = Array.from(
+      new Map(validFiles.map((file) => [file.name, file])).values()
+    );
+    setBulkPdfFiles(deduplicatedByName);
+  };
+
+  const uploadPdfForBulk = async (file: File): Promise<string> => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch('/api/upload-pdf', {
+      method: 'POST',
+      body: formData,
+    });
+    const parsed = await parseApiResponse(response);
+
+    if (!response.ok) {
+      throw new Error(getApiErrorMessage('PDF 업로드 실패', response, parsed));
+    }
+
+    if (!isRecord(parsed.data) || typeof parsed.data.url !== 'string') {
+      throw new Error('업로드 응답에 URL이 없습니다.');
+    }
+    return parsed.data.url;
+  };
+
+  const resolveBulkSourceUrl = async (job: BulkJob): Promise<string> => {
+    const rawSourceUrl = job.sourceUrl.trim();
+
+    if (job.sourceType !== 'pdf') {
+      return rawSourceUrl;
+    }
+
+    if (rawSourceUrl && !rawSourceUrl.startsWith('file:')) {
+      return rawSourceUrl;
+    }
+
+    const referencedName = rawSourceUrl.startsWith('file:') ? rawSourceUrl.slice(5).trim() : '';
+    const fileName = referencedName || job.pdfFileName?.trim() || '';
+
+    if (!fileName) {
+      throw new Error('PDF 소스 URL 또는 pdfFileName이 필요합니다.');
+    }
+
+    const matchedFile = bulkPdfFiles.find((file) => file.name === fileName);
+    if (!matchedFile) {
+      throw new Error(`PDF 파일(${fileName})을 찾을 수 없습니다.`);
+    }
+
+    return await uploadPdfForBulk(matchedFile);
+  };
+
+  const runBulkGeneration = async (failedOnly: boolean) => {
+    if (isGenerating || isBulkRunning) {
+      return;
+    }
+
+    const jobsToRun = failedOnly ? bulkJobs.filter((job) => job.status === 'failed') : bulkJobs;
+
+    if (jobsToRun.length === 0) {
+      setBulkCsvError(
+        failedOnly
+          ? '재시도할 실패 항목이 없습니다.'
+          : '먼저 CSV를 파싱하여 실행할 항목을 준비해주세요.'
+      );
+      return;
+    }
+
+    const jobIds = new Set(jobsToRun.map((job) => job.projectId));
+    setBulkJobs((prev) =>
+      prev.map((job) =>
+        jobIds.has(job.projectId)
+          ? { ...job, status: 'queued', message: undefined, generatedTitle: undefined }
+          : job
+      )
+    );
+
+    setBulkCsvError(null);
+    setBulkSummary(null);
+    setError(null);
+    setIsBulkRunning(true);
+
+    let successCount = 0;
+    let failedCount = 0;
+    const queue = [...jobsToRun];
+    const workerCount = Math.max(1, Math.min(3, bulkConcurrency, queue.length));
+
+    try {
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (queue.length > 0) {
+          const job = queue.shift();
+          if (!job) break;
+
+          updateBulkJob(job.projectId, {
+            status: 'running',
+            message: '처리 중...',
+            generatedTitle: undefined,
+          });
+
+          try {
+            const finalSourceUrl = await resolveBulkSourceUrl(job);
+            const response = await fetch('/api/generate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                sourceType: job.sourceType,
+                sourceUrl: finalSourceUrl,
+                projectId: job.projectId,
+                authors: job.authors || undefined,
+                venue: job.venue || undefined,
+                institution: job.institution || undefined,
+                researchYear: job.researchYear || new Date().getFullYear().toString(),
+              }),
+            });
+            const parsed = await parseApiResponse(response);
+
+            if (!response.ok) {
+              throw new Error(getApiErrorMessage('생성 실패', response, parsed));
+            }
+
+            if (!isRecord(parsed.data)) {
+              throw new Error('생성 응답이 JSON 형식이 아닙니다.');
+            }
+
+            const result = parsed.data;
+            successCount += 1;
+            updateBulkJob(job.projectId, {
+              status: 'success',
+              message:
+                typeof result.message === 'string'
+                  ? result.message
+                  : '생성 완료',
+              generatedTitle:
+                isRecord(result.data) && typeof result.data.title === 'string'
+                  ? result.data.title
+                  : undefined,
+            });
+          } catch (error) {
+            failedCount += 1;
+            const message = error instanceof Error ? error.message : '알 수 없는 오류';
+            updateBulkJob(job.projectId, {
+              status: 'failed',
+              message,
+            });
+          }
+        }
+      });
+
+      await Promise.all(workers);
+
+      setBulkSummary({
+        total: jobsToRun.length,
+        success: successCount,
+        failed: failedCount,
+      });
+
+      if (successCount > 0) {
+        setSuccessMessage(`배치 생성 완료: 성공 ${successCount}건, 실패 ${failedCount}건`);
+        setTimeout(() => setSuccessMessage(null), 5000);
+      }
+    } finally {
+      setIsBulkRunning(false);
+    }
   };
 
   return (
@@ -1180,18 +1738,26 @@ function SubpagesTab({
           {/* 저자 입력 (간단 모드) */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
-              저자 (선택, 쉼표로 구분)
+              {selectedSource === 'pdf'
+                ? '저자 (선택, 비우면 PDF에서 자동 추출)'
+                : '저자 (선택, 쉼표로 구분)'}
             </label>
             <input
               type="text"
-              placeholder="홍길동, 김철수"
+              placeholder={
+                selectedSource === 'pdf'
+                  ? '비워두면 PDF 텍스트에서 자동 추출됩니다'
+                  : '홍길동, 김철수'
+              }
               value={authors}
               onChange={(e) => setAuthors(e.target.value)}
               className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-white text-gray-900 focus:ring-2 focus:ring-primary focus:border-transparent outline-none"
               disabled={isGenerating}
             />
             <p className="mt-1 text-xs text-gray-500">
-              간단 입력 모드 - 소속이 같을 때 사용
+              {selectedSource === 'pdf'
+                ? 'PDF는 저자를 자동 추출합니다. 이 입력값은 추출 실패 시 보조값으로 사용됩니다.'
+                : '간단 입력 모드 - 소속이 같을 때 사용'}
             </p>
           </div>
 
@@ -1215,7 +1781,9 @@ function SubpagesTab({
         <div className="mt-4">
           <div className="flex items-center justify-between mb-2">
             <label className="block text-sm font-medium text-gray-700">
-              저자별 소속 (상세 모드)
+              {selectedSource === 'pdf'
+                ? '저자별 소속 (선택, 자동 추출 실패 대비)'
+                : '저자별 소속 (상세 모드)'}
             </label>
             <button
               type="button"
@@ -1229,7 +1797,9 @@ function SubpagesTab({
 
           {authorList.length === 0 ? (
             <div className="p-4 rounded-xl border border-dashed border-gray-300 text-center text-sm text-gray-500">
-              저자별 소속을 입력하려면 &quot;+ 저자 추가&quot; 버튼을 클릭하세요
+              {selectedSource === 'pdf'
+                ? 'PDF는 저자를 자동 추출합니다. 필요할 때만 &quot;+ 저자 추가&quot;로 수동 보완하세요'
+                : '저자별 소속을 입력하려면 &quot;+ 저자 추가&quot; 버튼을 클릭하세요'}
             </div>
           ) : (
             <div className="space-y-2">
@@ -1322,8 +1892,8 @@ function SubpagesTab({
       <div className="flex justify-center mb-8">
         <button
           onClick={onGenerate}
-          disabled={isGenerating}
-          className={`flex items-center gap-3 px-12 py-4 bg-gradient-to-r from-primary to-accent text-white rounded-2xl font-bold text-lg transition-all hover:shadow-lg hover:shadow-primary/25 ${isGenerating ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90'
+          disabled={isGenerating || isBulkRunning}
+          className={`flex items-center gap-3 px-12 py-4 bg-gradient-to-r from-primary to-accent text-white rounded-2xl font-bold text-lg transition-all hover:shadow-lg hover:shadow-primary/25 ${(isGenerating || isBulkRunning) ? 'opacity-50 cursor-not-allowed' : 'hover:opacity-90'
             }`}
         >
           {isGenerating ? (
@@ -1364,6 +1934,211 @@ function SubpagesTab({
             </>
           )}
         </button>
+      </div>
+
+      {/* Bulk Generation */}
+      <div className="bg-white rounded-2xl p-6 mb-8 border border-gray-200">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+          <h2 className="text-lg font-bold text-gray-900">배치 생성 (1차)</h2>
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-gray-500">동시 처리</span>
+            <select
+              value={bulkConcurrency}
+              onChange={(e) => setBulkConcurrency(Number(e.target.value))}
+              className="px-2 py-1 rounded-lg border border-gray-300 bg-white text-gray-900"
+              disabled={isGenerating || isBulkRunning}
+            >
+              <option value={1}>1</option>
+              <option value={2}>2</option>
+              <option value={3}>3</option>
+            </select>
+          </div>
+        </div>
+        <p className="text-sm text-gray-500 mb-4">
+          CSV로 여러 항목을 한 번에 생성합니다. PDF 파일은 다중 업로드 후 `pdfFileName` 또는 `sourceUrl=file:파일명`으로 매칭하세요.
+        </p>
+        <div className="mb-4 p-3 rounded-xl bg-gray-50 border border-gray-200 text-sm text-gray-700">
+          <p className="font-medium mb-2">빠른 사용 순서</p>
+          <p>1) CSV 업로드 또는 입력 → 2) `CSV 파싱` → 3) 필요하면 PDF 파일 업로드 → 4) `전체 실행`</p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">CSV 파일 업로드</label>
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              onChange={handleBulkCsvFileSelect}
+              disabled={isGenerating || isBulkRunning}
+              className="block w-full text-sm text-gray-700 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              PDF 파일 업로드 (여러 개, 선택)
+            </label>
+            <input
+              type="file"
+              accept="application/pdf"
+              multiple
+              onChange={handleBulkPdfFilesSelect}
+              disabled={isGenerating || isBulkRunning}
+              className="block w-full text-sm text-gray-700 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200"
+            />
+            {bulkPdfFiles.length > 0 && (
+              <p className="text-xs text-gray-500 mt-2">
+                선택된 PDF {bulkPdfFiles.length}개: {bulkPdfFiles.map((file) => file.name).join(', ')}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <textarea
+          value={bulkCsvText}
+          onChange={(e) => setBulkCsvText(e.target.value)}
+          placeholder="sourceType,sourceUrl,projectId,authors,institution,venue,researchYear,pdfFileName"
+          rows={8}
+          disabled={isGenerating || isBulkRunning}
+          className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-white text-gray-900 font-mono text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none"
+        />
+
+        <div className="flex flex-wrap gap-3 mt-4">
+          <button
+            type="button"
+            onClick={handleParseBulkCsv}
+            disabled={isGenerating || isBulkRunning}
+            className="px-4 py-2 rounded-lg bg-gray-800 text-white text-sm font-medium hover:bg-gray-900 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            CSV 파싱
+          </button>
+          <button
+            type="button"
+            onClick={() => setBulkCsvText(BULK_SAMPLE_CSV)}
+            disabled={isGenerating || isBulkRunning}
+            className="px-4 py-2 rounded-lg bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            샘플 불러오기
+          </button>
+          <button
+            type="button"
+            onClick={handleDownloadBulkTemplate}
+            disabled={isGenerating || isBulkRunning}
+            className="px-4 py-2 rounded-lg bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            템플릿 다운로드
+          </button>
+          <button
+            type="button"
+            onClick={() => runBulkGeneration(false)}
+            disabled={isGenerating || isBulkRunning || bulkJobs.length === 0}
+            className="px-4 py-2 rounded-lg bg-gradient-to-r from-primary to-accent text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isBulkRunning ? '배치 실행 중...' : '전체 실행'}
+          </button>
+          <button
+            type="button"
+            onClick={() => runBulkGeneration(true)}
+            disabled={isGenerating || isBulkRunning || !bulkJobs.some((job) => job.status === 'failed')}
+            className="px-4 py-2 rounded-lg bg-amber-100 text-amber-800 text-sm font-medium hover:bg-amber-200 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            실패만 재시도
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setBulkCsvText('');
+              setBulkJobs([]);
+              setBulkPdfFiles([]);
+              setBulkCsvError(null);
+              setBulkSummary(null);
+            }}
+            disabled={isGenerating || isBulkRunning}
+            className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            초기화
+          </button>
+        </div>
+
+        {bulkJobs.length > 0 && (
+          <div className="mt-4 p-4 rounded-xl bg-gray-50 border border-gray-200">
+            <div className="flex flex-wrap items-center gap-3 text-sm mb-3">
+              <span className="px-2 py-1 rounded-full bg-gray-200 text-gray-700">
+                대기 {bulkStatusCount.queued}
+              </span>
+              <span className="px-2 py-1 rounded-full bg-blue-100 text-blue-700">
+                진행 {bulkStatusCount.running}
+              </span>
+              <span className="px-2 py-1 rounded-full bg-emerald-100 text-emerald-700">
+                성공 {bulkStatusCount.success}
+              </span>
+              <span className="px-2 py-1 rounded-full bg-red-100 text-red-700">
+                실패 {bulkStatusCount.failed}
+              </span>
+              <span className="ml-auto font-medium text-gray-700">
+                {bulkCompletedCount}/{bulkJobs.length} 완료 ({bulkProgressPercent}%)
+              </span>
+            </div>
+            <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-primary to-accent transition-all duration-300"
+                style={{ width: `${bulkProgressPercent}%` }}
+              ></div>
+            </div>
+          </div>
+        )}
+
+        {bulkCsvError && (
+          <div className="mt-4 p-3 rounded-lg bg-red-50 border border-red-200">
+            <p className="text-sm text-red-700 whitespace-pre-wrap">{bulkCsvError}</p>
+          </div>
+        )}
+
+        {bulkSummary && (
+          <div className="mt-4 p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">
+            총 {bulkSummary.total}건 중 성공 {bulkSummary.success}건, 실패 {bulkSummary.failed}건
+          </div>
+        )}
+
+        {bulkJobs.length > 0 && (
+          <div className="mt-4 overflow-x-auto border border-gray-200 rounded-xl">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">projectId</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">source</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">status</th>
+                  <th className="px-3 py-2 text-left font-semibold text-gray-600">message</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {bulkJobs.map((job) => (
+                  <tr key={job.projectId}>
+                    <td className="px-3 py-2 font-mono text-gray-800">{job.projectId}</td>
+                    <td className="px-3 py-2 text-gray-600">
+                      {job.sourceType}
+                      {job.sourceType === 'pdf' && job.pdfFileName ? ` (${job.pdfFileName})` : ''}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${job.status === 'success'
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : job.status === 'failed'
+                          ? 'bg-red-100 text-red-700'
+                          : job.status === 'running'
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                        {job.status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-gray-600">
+                      {job.generatedTitle || job.message || '-'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Generated Result */}
@@ -1516,6 +2291,15 @@ function SubpagesTab({
                 />
               </svg>
               미리보기
+            </button>
+            <button
+              onClick={onPublish}
+              className="flex-1 px-6 py-3 rounded-xl bg-gray-800 text-white font-medium hover:bg-gray-900 transition-colors flex items-center justify-center gap-2"
+            >
+              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                <path fillRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clipRule="evenodd" />
+              </svg>
+              사이트에 게시 (GitHub)
             </button>
             <Link
               href={`/projects/${generatedData.projectId}`}

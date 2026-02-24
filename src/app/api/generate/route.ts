@@ -1,25 +1,813 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFile, mkdir } from 'fs/promises';
+import { writeFile, mkdir, readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
+import matter from 'gray-matter';
 import type { AcademicProjectData } from '@/lib/types';
 import { extractYouTubeId, extractGitHubInfo } from '@/lib/services/url-utils';
 
+export const runtime = 'nodejs';
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const TEXT_MODEL_NAME = 'gemini-3-pro-preview';
+const TEXT_MODEL_NAME = 'gemini-3.1-pro-preview';
 const IMAGE_MODEL_NAME = 'gemini-3-pro-image-preview';
+
+type PDFJSModule = {
+  getDocument: (params: Record<string, unknown>) => {
+    promise: Promise<{
+      numPages: number;
+      getPage: (pageNumber: number) => Promise<{
+        getTextContent: () => Promise<{ items: unknown[] }>;
+        cleanup: () => void;
+      }>;
+      cleanup: () => Promise<void> | void;
+      destroy: () => Promise<void> | void;
+    }>;
+  };
+};
+
+let cachedPDFJSModule: PDFJSModule | null = null;
+let cachedStandardFontDataUrl: string | undefined;
+
+type PDFJSImportShape = {
+  getDocument?: unknown;
+  default?: unknown;
+};
+
+type NativeDynamicImport = (specifier: string) => Promise<unknown>;
+
+let cachedNativeDynamicImport: NativeDynamicImport | null = null;
+
+function getStandardFontDataUrl(): string | undefined {
+  if (cachedStandardFontDataUrl !== undefined) {
+    return cachedStandardFontDataUrl;
+  }
+
+  const candidates = [
+    path.join(process.cwd(), 'node_modules', 'pdfjs-dist', 'standard_fonts'),
+    path.join(process.cwd(), 'modulabs-result-site', 'node_modules', 'pdfjs-dist', 'standard_fonts'),
+  ];
+
+  for (const candidatePath of candidates) {
+    if (existsSync(candidatePath)) {
+      cachedStandardFontDataUrl = `${pathToFileURL(candidatePath).href.replace(/\/?$/, '/')}`;
+      return cachedStandardFontDataUrl;
+    }
+  }
+
+  cachedStandardFontDataUrl = '';
+  return undefined;
+}
+
+function normalizePDFJSImport(candidate: unknown): PDFJSModule | null {
+  if (
+    typeof candidate === 'object' &&
+    candidate !== null &&
+    typeof (candidate as { getDocument?: unknown }).getDocument === 'function'
+  ) {
+    return candidate as PDFJSModule;
+  }
+
+  return null;
+}
+
+function getPDFJSLegacyModuleSpecifiers(): string[] {
+  const specifiers = ['pdfjs-dist/legacy/build/pdf.mjs'];
+  const moduleCandidates = [
+    path.join(process.cwd(), 'node_modules', 'pdfjs-dist', 'legacy', 'build', 'pdf.mjs'),
+    path.join(process.cwd(), 'modulabs-result-site', 'node_modules', 'pdfjs-dist', 'legacy', 'build', 'pdf.mjs'),
+  ];
+
+  for (const modulePath of moduleCandidates) {
+    if (existsSync(modulePath)) {
+      specifiers.push(pathToFileURL(modulePath).href);
+    }
+  }
+
+  return [...new Set(specifiers)];
+}
+
+function getNativeDynamicImport(): NativeDynamicImport {
+  if (cachedNativeDynamicImport) {
+    return cachedNativeDynamicImport;
+  }
+
+  cachedNativeDynamicImport = new Function('specifier', 'return import(specifier);') as NativeDynamicImport;
+  return cachedNativeDynamicImport;
+}
+
+async function loadPDFJSModule(): Promise<PDFJSModule> {
+  if (cachedPDFJSModule) {
+    return cachedPDFJSModule;
+  }
+
+  const nativeImport = getNativeDynamicImport();
+  let lastError: unknown;
+
+  for (const specifier of getPDFJSLegacyModuleSpecifiers()) {
+    try {
+      const importedModule = (await nativeImport(specifier)) as PDFJSImportShape;
+      const normalized =
+        normalizePDFJSImport(importedModule) ?? normalizePDFJSImport(importedModule.default);
+
+      if (normalized) {
+        cachedPDFJSModule = normalized;
+        return cachedPDFJSModule;
+      }
+
+      lastError = new Error(`pdfjs-dist legacy 모듈 형식이 예상과 다릅니다: ${specifier}`);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('pdfjs-dist legacy 모듈 로딩에 실패했습니다.');
+}
+
+async function extractPdfText(pdfBuffer: Buffer): Promise<string> {
+  const pdfjs = await loadPDFJSModule();
+  const standardFontDataUrl = getStandardFontDataUrl();
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(pdfBuffer),
+    disableWorker: true,
+    isEvalSupported: false,
+    ...(standardFontDataUrl ? { standardFontDataUrl } : {}),
+  });
+  const document = await loadingTask.promise;
+
+  try {
+    const pageTexts: string[] = [];
+    const maxPages = Math.min(document.numPages, 80);
+
+    for (let pageNumber = 1; pageNumber <= maxPages; pageNumber++) {
+      const page = await document.getPage(pageNumber);
+      try {
+        const content = await page.getTextContent();
+        const parts: string[] = [];
+        for (const item of content.items as Array<{ str?: unknown; hasEOL?: unknown }>) {
+          if (typeof item?.str !== 'string' || !item.str) {
+            continue;
+          }
+          parts.push(item.str);
+          parts.push(item.hasEOL ? '\n' : ' ');
+        }
+        pageTexts.push(parts.join('').trim());
+      } finally {
+        page.cleanup();
+      }
+    }
+
+    return pageTexts.join('\n').substring(0, 100000);
+  } finally {
+    await document.cleanup();
+    await document.destroy();
+  }
+}
+
+function extractPaperPathFromSourceUrl(sourceUrl: string): string | null {
+  const trimmed = sourceUrl.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith('/papers/')) {
+    return trimmed;
+  }
+
+  if (trimmed.startsWith('file:')) {
+    const fileHint = trimmed.slice(5).trim();
+    if (!fileHint) return null;
+    return fileHint.startsWith('/papers/') ? fileHint : `/papers/${fileHint.replace(/^\/+/, '')}`;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const pathname = parsed.pathname;
+    if (pathname.startsWith('/papers/')) {
+      return pathname;
+    }
+
+    const publicPapersIndex = pathname.indexOf('/public/papers/');
+    if (publicPapersIndex >= 0) {
+      return pathname.slice(publicPapersIndex + '/public'.length);
+    }
+
+    const papersIndex = pathname.indexOf('/papers/');
+    if (papersIndex >= 0) {
+      return pathname.slice(papersIndex);
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function resolveLocalPdfPathFromPaperPath(paperPath: string): string | null {
+  const normalizedPath = path.posix.normalize(paperPath);
+  if (!normalizedPath.startsWith('/papers/')) {
+    return null;
+  }
+
+  const relativePath = normalizedPath.replace(/^\/+/, '');
+  const candidates = [
+    path.join(process.cwd(), 'public', relativePath),
+    // Support nested workspace layouts where app root is one level below.
+    path.join(process.cwd(), 'modulabs-result-site', 'public', relativePath),
+  ];
+
+  for (const candidatePath of candidates) {
+    if (existsSync(candidatePath)) {
+      return candidatePath;
+    }
+  }
+
+  return null;
+}
+
+function resolveLocalPdfPathFromFilename(filename: string): string | null {
+  const safeName = filename.trim();
+  if (!safeName || !safeName.toLowerCase().endsWith('.pdf')) {
+    return null;
+  }
+
+  const candidates = [
+    path.join(process.cwd(), 'public', 'papers', safeName),
+    path.join(process.cwd(), 'modulabs-result-site', 'public', 'papers', safeName),
+  ];
+
+  for (const candidatePath of candidates) {
+    if (existsSync(candidatePath)) {
+      return candidatePath;
+    }
+  }
+
+  return null;
+}
+
+function resolveLocalPdfPathFromSourceUrl(sourceUrl: string): string | null {
+  const paperPath = extractPaperPathFromSourceUrl(sourceUrl);
+  if (paperPath) {
+    const fromPaperPath = resolveLocalPdfPathFromPaperPath(paperPath);
+    if (fromPaperPath) {
+      return fromPaperPath;
+    }
+  }
+
+  try {
+    const parsed = new URL(sourceUrl);
+    const basename = path.posix.basename(parsed.pathname);
+    return resolveLocalPdfPathFromFilename(basename);
+  } catch {
+    const withoutQuery = sourceUrl.split('?')[0].split('#')[0];
+    const basename = path.posix.basename(withoutQuery);
+    return resolveLocalPdfPathFromFilename(basename);
+  }
+}
+
+function parseGitHubFileUrl(sourceUrl: string): {
+  owner: string;
+  repo: string;
+  ref: string;
+  filePath: string;
+} | null {
+  try {
+    const url = new URL(sourceUrl);
+
+    if (url.hostname === 'raw.githubusercontent.com') {
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (parts.length >= 4) {
+        const [owner, repo, ref, ...filePathParts] = parts;
+        const filePath = filePathParts.join('/');
+        if (owner && repo && ref && filePath) {
+          return { owner, repo, ref, filePath };
+        }
+      }
+      return null;
+    }
+
+    if (url.hostname === 'github.com') {
+      const parts = url.pathname.split('/').filter(Boolean);
+      // /{owner}/{repo}/blob/{ref}/{path}
+      if (parts.length >= 5 && parts[2] === 'blob') {
+        const [owner, repo, , ref, ...filePathParts] = parts;
+        const filePath = filePathParts.join('/');
+        if (owner && repo && ref && filePath) {
+          return { owner, repo, ref, filePath };
+        }
+      }
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function loadPdfBufferFromGitHubUrl(sourceUrl: string): Promise<Buffer | null> {
+  const githubFile = parseGitHubFileUrl(sourceUrl);
+  if (!githubFile) {
+    return null;
+  }
+
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) {
+    return null;
+  }
+
+  const apiUrl = `https://api.github.com/repos/${githubFile.owner}/${githubFile.repo}/contents/${githubFile.filePath}?ref=${encodeURIComponent(githubFile.ref)}`;
+  const response = await fetch(apiUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github.v3+json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const payload = (await response.json()) as { content?: string; encoding?: string };
+  if (payload.encoding !== 'base64' || typeof payload.content !== 'string') {
+    return null;
+  }
+
+  const base64 = payload.content.replace(/\s+/g, '');
+  return Buffer.from(base64, 'base64');
+}
+
+async function loadPdfBufferFromSource(sourceUrl: string): Promise<Buffer | null> {
+  const localPath = resolveLocalPdfPathFromSourceUrl(sourceUrl);
+  if (localPath) {
+    return await readFile(localPath);
+  }
+
+  if (sourceUrl.startsWith('http://') || sourceUrl.startsWith('https://')) {
+    const githubBuffer = await loadPdfBufferFromGitHubUrl(sourceUrl);
+    if (githubBuffer) {
+      return githubBuffer;
+    }
+
+    const token = process.env.GITHUB_TOKEN;
+    const shouldTryAuthHttpFetch =
+      sourceUrl.includes('github.com') || sourceUrl.includes('githubusercontent.com');
+
+    if (token && shouldTryAuthHttpFetch) {
+      const authenticatedResponse = await fetch(sourceUrl, {
+        cache: 'no-store',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (authenticatedResponse.ok) {
+        const arrayBuffer = await authenticatedResponse.arrayBuffer();
+        return Buffer.from(arrayBuffer);
+      }
+    }
+
+    const response = await fetch(sourceUrl, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`PDF 다운로드 실패 (${sourceUrl}): ${response.status} ${response.statusText}`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  }
+
+  return null;
+}
+
+function uniqueNonEmpty(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+
+  return result;
+}
+
+function parseAuthorNamesFromTextInput(value: string): string[] {
+  return uniqueNonEmpty(
+    value
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean)
+  );
+}
+
+function toAuthorObjectsFromNames(names: string[]): AcademicProjectData['authors'] {
+  return uniqueNonEmpty(names).map((name) => ({ name }));
+}
+
+function normalizeAuthorKey(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function mergeAuthor(
+  base: AcademicProjectData['authors'][number],
+  incoming: AcademicProjectData['authors'][number]
+): AcademicProjectData['authors'][number] {
+  return {
+    ...base,
+    name: base.name || incoming.name,
+    url: base.url || incoming.url,
+    affiliation: base.affiliation || incoming.affiliation,
+    equalContribution:
+      typeof base.equalContribution === 'boolean'
+        ? base.equalContribution
+        : incoming.equalContribution,
+  };
+}
+
+function mergeAuthorSets(
+  base: AcademicProjectData['authors'],
+  incoming: AcademicProjectData['authors'],
+  options: { allowNewNames?: boolean } = {}
+): AcademicProjectData['authors'] {
+  const allowNewNames = options.allowNewNames ?? true;
+  const merged = base
+    .map((author) => ({
+      ...author,
+      name: author.name.trim(),
+    }))
+    .filter((author) => Boolean(author.name));
+  const indexByKey = new Map<string, number>();
+
+  for (let i = 0; i < merged.length; i++) {
+    indexByKey.set(normalizeAuthorKey(merged[i].name), i);
+  }
+
+  for (const author of incoming) {
+    const name = author.name.trim();
+    if (!name) continue;
+    const key = normalizeAuthorKey(name);
+    const index = indexByKey.get(key);
+    const normalizedIncoming = { ...author, name };
+
+    if (typeof index === 'number') {
+      merged[index] = mergeAuthor(merged[index], normalizedIncoming);
+      continue;
+    }
+
+    if (!allowNewNames) {
+      continue;
+    }
+
+    indexByKey.set(key, merged.length);
+    merged.push(normalizedIncoming);
+  }
+
+  return merged;
+}
+
+function parseManualAuthorList(authorList: unknown): AcademicProjectData['authors'] {
+  if (!Array.isArray(authorList)) {
+    return [];
+  }
+
+  const normalized: AcademicProjectData['authors'] = [];
+  for (const author of authorList) {
+    if (typeof author !== 'object' || author === null) {
+      continue;
+    }
+
+    const record = author as Record<string, unknown>;
+    const name = typeof record.name === 'string' ? record.name.trim() : '';
+    if (!name) {
+      continue;
+    }
+
+    const parsedAuthor: AcademicProjectData['authors'][number] = { name };
+    if (typeof record.affiliation === 'string' && record.affiliation.trim()) {
+      parsedAuthor.affiliation = record.affiliation.trim();
+    }
+    if (typeof record.url === 'string' && record.url.trim()) {
+      parsedAuthor.url = record.url.trim();
+    }
+    if (typeof record.equalContribution === 'boolean') {
+      parsedAuthor.equalContribution = record.equalContribution;
+    }
+
+    normalized.push(parsedAuthor);
+  }
+
+  return mergeAuthorSets([], normalized);
+}
+
+function applyAffiliationByPosition(
+  baseAuthors: AcademicProjectData['authors'],
+  manualAuthors: AcademicProjectData['authors']
+): AcademicProjectData['authors'] {
+  if (baseAuthors.length === 0 || manualAuthors.length === 0) {
+    return baseAuthors;
+  }
+  if (baseAuthors.length !== manualAuthors.length) {
+    return baseAuthors;
+  }
+  if (!manualAuthors.some((author) => Boolean(author.affiliation))) {
+    return baseAuthors;
+  }
+
+  return baseAuthors.map((author, index) => {
+    if (author.affiliation) {
+      return author;
+    }
+
+    const affiliation = manualAuthors[index]?.affiliation;
+    return affiliation ? { ...author, affiliation } : author;
+  });
+}
+
+function normalizeGeneratedAuthors(authors: unknown): AcademicProjectData['authors'] {
+  if (!Array.isArray(authors)) {
+    return [];
+  }
+
+  const normalized: AcademicProjectData['authors'] = [];
+
+  for (const author of authors) {
+    if (typeof author === 'string') {
+      const name = author.trim();
+      if (name) {
+        normalized.push({ name });
+      }
+      continue;
+    }
+
+    if (typeof author !== 'object' || author === null) {
+      continue;
+    }
+
+    const record = author as Record<string, unknown>;
+    const name = typeof record.name === 'string' ? record.name.trim() : '';
+    if (!name) {
+      continue;
+    }
+
+    const parsedAuthor: AcademicProjectData['authors'][number] = { name };
+    if (typeof record.url === 'string' && record.url.trim()) {
+      parsedAuthor.url = record.url.trim();
+    }
+    if (typeof record.affiliation === 'string' && record.affiliation.trim()) {
+      parsedAuthor.affiliation = record.affiliation.trim();
+    }
+    if (typeof record.equalContribution === 'boolean') {
+      parsedAuthor.equalContribution = record.equalContribution;
+    }
+
+    normalized.push(parsedAuthor);
+  }
+
+  return mergeAuthorSets([], normalized);
+}
+
+const AUTHOR_NOISE_PATTERNS = [
+  /\b(abstract|introduction|keywords?|index terms?|university|institute|department|laboratory|school|college|conference|journal|figure|table|appendix|copyright|arxiv|doi)\b/i,
+  /(초록|요약|서론|키워드|대학교|대학원|연구소|학과|실험실|저널|학회|그림|표)/,
+];
+
+const AUTHOR_SECTION_STOP_PATTERNS = [
+  /^(abstract|요약|초록)\b/i,
+  /^(keywords?|key words?|index terms?)\b/i,
+  /^1\s*[\.\)]?\s*(introduction|서론)\b/i,
+];
+
+const AUTHOR_LINE_HARD_STOP_PATTERNS = [
+  /^(figure|fig\.?|table|appendix)\b/i,
+  /^https?:\/\//i,
+  /^copyright\b/i,
+];
+
+function hasAuthorNoise(text: string): boolean {
+  return AUTHOR_NOISE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function normalizeAuthorToken(token: string): string {
+  return token
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/[†‡*]/g, ' ')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[,;:.\-]+|[,;:.\-]+$/g, '');
+}
+
+function isLikelyEnglishAuthorName(name: string): boolean {
+  const words = name.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 5) return false;
+
+  let nameWordCount = 0;
+  for (const word of words) {
+    if (/^(?:[A-Z]\.){1,3}$/.test(word)) {
+      nameWordCount += 1;
+      continue;
+    }
+    if (/^[A-Z][a-z]+(?:[-'][A-Za-z]+)*$/.test(word)) {
+      nameWordCount += 1;
+      continue;
+    }
+    if (/^[A-Z][a-z]?\.$/.test(word)) {
+      nameWordCount += 1;
+      continue;
+    }
+    if (/^(?:de|da|del|van|von|der|den|di|la|le|bin|al)$/i.test(word)) {
+      continue;
+    }
+    return false;
+  }
+
+  return nameWordCount >= 2;
+}
+
+function isLikelyKoreanAuthorName(name: string): boolean {
+  const compact = name.replace(/\s+/g, '');
+  return /^[가-힣]{2,5}$/.test(compact);
+}
+
+function isLikelyAuthorName(name: string): boolean {
+  const normalized = normalizeAuthorToken(name);
+  if (!normalized) return false;
+  if (normalized.length < 2 || normalized.length > 60) return false;
+  if (/\d|@|https?:\/\//i.test(normalized)) return false;
+  if (hasAuthorNoise(normalized)) return false;
+  if (isLikelyKoreanAuthorName(normalized)) return true;
+  if (/[A-Za-z]/.test(normalized) && isLikelyEnglishAuthorName(normalized)) return true;
+  return false;
+}
+
+function extractAuthorNamesFromLine(line: string): string[] {
+  if (!line) return [];
+  if (AUTHOR_LINE_HARD_STOP_PATTERNS.some((pattern) => pattern.test(line.trim()))) {
+    return [];
+  }
+
+  const sanitizedLine = line
+    .replace(/\S+@\S+/g, ' ')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/orcid\.org\/\S+/gi, ' ')
+    .replace(/[\u00B7•·]/g, ',')
+    .replace(/\d+(?=\s|$)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!sanitizedLine || sanitizedLine.length > 240) {
+    return [];
+  }
+
+  const withoutPrefix = sanitizedLine.replace(/^(?:authors?|author|by|저자)\s*[:\-]?\s*/i, '').trim();
+  if (!withoutPrefix) {
+    return [];
+  }
+
+  let parts = withoutPrefix
+    .split(/\s*(?:,|;| and | & |\/)\s*/i)
+    .map(normalizeAuthorToken)
+    .filter(Boolean);
+
+  if (parts.length <= 1) {
+    parts =
+      withoutPrefix.match(
+        /(?:[A-Z][a-z]+(?:[-'][A-Za-z]+)*|(?:[A-Z]\.){1,3})(?:\s+(?:[A-Z][a-z]+(?:[-'][A-Za-z]+)*|(?:[A-Z]\.){1,3}|(?:de|da|del|van|von|der|den|di|la|le|bin|al))){1,4}|[가-힣]{2,5}/g
+      ) ?? [];
+  }
+
+  return uniqueNonEmpty(parts.filter(isLikelyAuthorName));
+}
+
+function scoreAuthorLine(line: string, names: string[], lineIndex: number): number {
+  let score = names.length * 3;
+
+  if (/^(?:authors?|author|by|저자)\b/i.test(line)) {
+    score += 7;
+  }
+  if (lineIndex <= 8) {
+    score += 2;
+  }
+  if (line.length <= 110) {
+    score += 1;
+  }
+  if (hasAuthorNoise(line) && !/^(?:authors?|author|by|저자)\b/i.test(line)) {
+    score -= 3;
+  }
+  if (/\S+@\S+/.test(line)) {
+    score -= 1;
+  }
+
+  return score;
+}
+
+function extractAuthorsFromPdfText(pdfText: string): string[] {
+  if (!pdfText) return [];
+
+  const firstChunk = pdfText.slice(0, 12000).replace(/\r/g, '\n');
+  const lines = firstChunk
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const stopIndex = lines.findIndex((line) =>
+    AUTHOR_SECTION_STOP_PATTERNS.some((pattern) => pattern.test(line))
+  );
+  const headerLines = lines.slice(0, stopIndex > 0 ? Math.min(stopIndex, 70) : Math.min(lines.length, 70));
+
+  if (headerLines.length === 0) {
+    return [];
+  }
+
+  const candidates: Array<{ names: string[]; score: number; index: number }> = [];
+  const scanLimit = Math.min(headerLines.length, 45);
+
+  for (let i = 0; i < scanLimit; i++) {
+    const line = headerLines[i];
+    const names = extractAuthorNamesFromLine(line);
+    if (names.length === 0) continue;
+
+    candidates.push({
+      names,
+      score: scoreAuthorLine(line, names, i),
+      index: i,
+    });
+
+    if (i + 1 < scanLimit) {
+      const nextLine = headerLines[i + 1];
+      const nextNames = extractAuthorNamesFromLine(nextLine);
+      if (nextNames.length > 0 && !hasAuthorNoise(nextLine)) {
+        const mergedNames = uniqueNonEmpty([...names, ...nextNames]);
+        if (mergedNames.length > names.length) {
+          candidates.push({
+            names: mergedNames,
+            score: scoreAuthorLine(line, names, i) + scoreAuthorLine(nextLine, nextNames, i + 1) - 1,
+            index: i,
+          });
+        }
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  candidates.sort(
+    (a, b) =>
+      b.score - a.score ||
+      b.names.length - a.names.length ||
+      a.index - b.index
+  );
+
+  const best = candidates[0]?.names ?? [];
+  if (best.length >= 2) {
+    return uniqueNonEmpty(best).slice(0, 12);
+  }
+
+  const merged = [...best];
+  for (const candidate of candidates.slice(1)) {
+    if (candidate.score < (candidates[0]?.score ?? 0) - 3) {
+      break;
+    }
+    for (const name of candidate.names) {
+      if (!merged.some((existing) => existing.toLowerCase() === name.toLowerCase())) {
+        merged.push(name);
+      }
+      if (merged.length >= 12) {
+        return merged;
+      }
+    }
+  }
+
+  return uniqueNonEmpty(merged).slice(0, 12);
+}
 
 export async function POST(request: NextRequest) {
   try {
     const { sourceType, sourceUrl, projectId, authors, authorList, venue, institution, researchYear } = await request.json();
 
-    // Convert authorList to authors string for prompt context
-    let authorInfo = authors || '';
-    if (authorList && authorList.length > 0) {
-      authorInfo = authorList
-        .map((a: { name: string; affiliation: string }) => `${a.name}${a.affiliation ? ` (${a.affiliation})` : ''}`)
-        .join(', ');
-    }
+    const manualAuthorObjects = parseManualAuthorList(authorList);
+    const manualAuthorNames = uniqueNonEmpty([
+      ...(typeof authors === 'string' ? parseAuthorNamesFromTextInput(authors) : []),
+      ...manualAuthorObjects.map((author) => author.name),
+    ]);
+    const fallbackManualAuthors = mergeAuthorSets(
+      toAuthorObjectsFromNames(manualAuthorNames),
+      manualAuthorObjects
+    );
+
+    // Prefer PDF-derived authors when available; otherwise keep manual input context.
+    let authorInfo = manualAuthorNames.join(', ');
+    let extractedPdfAuthorNames: string[] = [];
 
     if (!GEMINI_API_KEY) {
       return NextResponse.json(
@@ -63,7 +851,32 @@ export async function POST(request: NextRequest) {
     let prompt = '';
 
     if (sourceType === 'pdf') {
-      prompt = buildPDFPrompt(sourceUrl, projectId, authorInfo, venue, institution);
+      let pdfText = '';
+      try {
+        const dataBuffer = await loadPdfBufferFromSource(sourceUrl);
+        if (dataBuffer) {
+          pdfText = await extractPdfText(dataBuffer);
+        }
+      } catch (e) {
+        console.error('PDF extraction error:', e);
+      }
+
+      if (!pdfText.trim()) {
+        return NextResponse.json(
+          {
+            error:
+              'PDF 텍스트 추출에 실패했습니다. 텍스트 기반 PDF인지 확인하거나 접근 가능한 PDF URL/업로드 파일을 사용해주세요.',
+          },
+          { status: 422 }
+        );
+      }
+
+      extractedPdfAuthorNames = extractAuthorsFromPdfText(pdfText);
+      if (extractedPdfAuthorNames.length > 0) {
+        authorInfo = extractedPdfAuthorNames.join(', ');
+      }
+
+      prompt = buildPDFPrompt(sourceUrl, projectId, authorInfo, venue, institution, pdfText);
     } else if (sourceType === 'github') {
       prompt = buildGitHubPrompt(sourceUrl, githubInfo, projectId, authorInfo, institution);
     } else if (sourceType === 'youtube') {
@@ -93,7 +906,7 @@ export async function POST(request: NextRequest) {
 
       // Fix control characters and JSON issues from AI responses
       jsonStr = jsonStr.replace(/"([^"]*?)"/g, (match, content) => {
-        let sanitized = content
+        const sanitized = content
           .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '')
           .replace(/\n/g, '\\n')
           .replace(/\t/g, '\\t')
@@ -110,9 +923,12 @@ export async function POST(request: NextRequest) {
       // Fallback: create basic data if JSON parsing fails
       generatedData = {
         title: `${projectId} Project`,
-        authors: authors
-          ? authors.split(',').map((name: string) => ({ name: name.trim() }))
-          : [{ name: 'Author Name' }],
+        authors:
+          sourceType === 'pdf' && extractedPdfAuthorNames.length > 0
+            ? toAuthorObjectsFromNames(extractedPdfAuthorNames)
+            : fallbackManualAuthors.length > 0
+              ? fallbackManualAuthors
+              : [{ name: 'Author Name' }],
         institution: institution || 'ModuLabs',
         venue: venue || 'Publication Venue',
         year: new Date().getFullYear().toString(),
@@ -127,6 +943,34 @@ export async function POST(request: NextRequest) {
         relatedWorks: [],
       };
     }
+
+    const generatedAuthors = normalizeGeneratedAuthors(generatedData.authors);
+    const fallbackPdfAuthors = toAuthorObjectsFromNames(extractedPdfAuthorNames);
+    let fallbackAuthors =
+      sourceType === 'pdf'
+        ? (fallbackPdfAuthors.length > 0 ? fallbackPdfAuthors : fallbackManualAuthors)
+        : fallbackManualAuthors;
+
+    if (sourceType === 'pdf') {
+      fallbackAuthors = mergeAuthorSets(fallbackAuthors, manualAuthorObjects, {
+        allowNewNames: false,
+      });
+      fallbackAuthors = applyAffiliationByPosition(fallbackAuthors, manualAuthorObjects);
+    }
+
+    const enrichedBaseAuthors = mergeAuthorSets(fallbackAuthors, manualAuthorObjects, {
+      allowNewNames: false,
+    });
+    const enrichedWithGenerated = mergeAuthorSets(enrichedBaseAuthors, generatedAuthors, {
+      allowNewNames: false,
+    });
+
+    const finalAuthors =
+      enrichedWithGenerated.length > 0
+        ? enrichedWithGenerated
+        : generatedAuthors.length > 0
+          ? generatedAuthors
+          : [{ name: 'Author' }];
 
     // Sanitize carousel captions
     if (generatedData.carousel) {
@@ -191,7 +1035,7 @@ Style: Clean academic technical diagram with boxes, arrows, and labels. Use a pr
     // Ensure required fields
     const responseData: AcademicProjectData = {
       title: generatedData.title || `${projectId} Project`,
-      authors: generatedData.authors || [{ name: 'Author' }],
+      authors: finalAuthors,
       institution: generatedData.institution || institution || 'ModuLabs',
       venue: generatedData.venue || venue || 'Publication',
       year: generatedData.year || new Date().getFullYear().toString(),
@@ -237,40 +1081,50 @@ Style: Clean academic technical diagram with boxes, arrows, and labels. Use a pr
 }
 
 // Prompt building functions
-function buildPDFPrompt(sourceUrl: string, projectId: string, authorInfo: string, venue?: string, institution?: string): string {
+function buildPDFPrompt(sourceUrl: string, projectId: string, authorInfo: string, venue?: string, institution?: string, pdfText?: string): string {
+  const contentContext = pdfText
+    ? `\n\n[논문 텍스트 시작]\n${pdfText}\n[논문 텍스트 끝]\n\n위 [논문 텍스트]를 유일한 정보원으로 사용하여 답변하세요. 텍스트에 없는 내용은 절대 지어내지 마세요.`
+    : `\n\n[논문 텍스트 없음]\n텍스트 추출에 실패한 경우입니다. 확인 가능한 정보만 제한적으로 작성하세요.`;
+
   return `다음 논문 정보를 바탕으로 Academic Project Page 템플릿에 맞는 데이터를 생성해주세요.
 
 출처: ${sourceUrl}
 프로젝트 ID: ${projectId}
-저자: ${authorInfo || '정보 없음'}
+저자(자동 추출 우선): ${authorInfo || 'PDF 텍스트에서 자동 추출'}
 발표처: ${venue || '정보 없음'}
 기관: ${institution || 'ModuLabs'}
+${contentContext}
 
-## 중요: 출력 언어 지시
-- **title은 원문 유지** (영어 제목 그대로)
-- abstract, highlights 등 모든 설명 텍스트는 **한국어**로 작성
-- 저자명, 소속 기관명, 발표처, BibTeX는 원문 유지
+## 중요: 환각(Hallucination) 방지 지침
+1. **Fact Check**: 제공된 [논문 텍스트]에 명시된 내용만 포함하세요.
+2. **추측 금지**: 저자, 실험 결과, 수치 등이 텍스트에 없다면 지어내지 말고 일반적인 표현을 쓰거나 생략하세요.
+3. **언어**: 
+   - **title은 원문 유지** (영어 제목 그대로)
+   - abstract, highlights 등 모든 설명 텍스트는 **한국어**로 작성
+   - 저자명, 소속 기관명, 발표처, BibTeX는 원문 유지
+4. **저자 처리**:
+   - authors 배열은 PDF 텍스트(특히 제목/초록 앞부분)에서 추출한 실제 저자명으로 채우세요.
+   - 저자명을 추측하지 말고, 텍스트에서 확인되지 않으면 빈 문자열 대신 항목을 생략하세요.
 
 다음 형식으로 JSON 형태로 응답해주세요 (markdown 없이 JSON만):
 {
   "title": "논문 제목 (원문 영어 유지)",
   "authors": [
-    {"name": "저자명1", "url": "https://example.com/author1", "equalContribution": false, "affiliation": "소속기관1"},
-    {"name": "저자명2", "url": "", "equalContribution": false, "affiliation": "소속기관2"}
+    {"name": "저자명", "url": "", "equalContribution": false, "affiliation": "소속기관"}
   ],
   "institution": "${institution || 'ModuLabs'}",
   "venue": "${venue || 'Conference/Journal Name'}",
   "year": "2024",
-  "abstract": "논문의 핵심 내용을 상세하게 작성 (한국어, 5-8문장)",
+  "abstract": "논문의 핵심 내용을 상세하게 작성 (한국어, 5-8문장). 논문의 Introduction과 Conclusion을 위주로 요약.",
   "highlights": [
-    "첫 번째 핵심 기여점 (한국어 개조식, 15자 이내)",
-    "두 번째 핵심 기여점 (한국어 개조식, 15자 이내)",
-    "세 번째 핵심 기여점 (한국어 개조식, 15자 이내)"
+    "핵심 기여점 1 (한국어, 텍스트 기반)",
+    "핵심 기여점 2 (한국어, 텍스트 기반)",
+    "핵심 기여점 3 (한국어, 텍스트 기반)"
   ],
   "detailedDescription": {
-    "problem": ["기존 방법의 문제점 1", "기존 방법의 문제점 2"],
-    "method": ["제안 방법의 핵심 구성요소 1", "제안 방법의 핵심 구성요소 2"],
-    "results": ["주요 실험 결과 1", "주요 실험 결과 2"]
+    "problem": ["기존 방법의 문제점 (텍스트 기반)"],
+    "method": ["제안 방법의 핵심 (텍스트 기반)"],
+    "results": ["실험 결과 (텍스트 기반)"]
   },
   "links": [
     {"type": "paper", "url": "${sourceUrl}"}
@@ -278,7 +1132,7 @@ function buildPDFPrompt(sourceUrl: string, projectId: string, authorInfo: string
   "carousel": [
     {"type": "image", "src": "GENERATE_ARCHITECTURE_DIAGRAM", "caption": "제안 방법의 전체 아키텍처 다이어그램"}
   ],
-  "bibtex": {"code": "@inproceedings{title, author, year, ...}"}
+  "bibtex": {"code": "@inproceedings{...}"}
 }`;
 }
 
@@ -380,6 +1234,11 @@ async function saveMarkdownFile(
     await mkdir(contentDir, { recursive: true });
   }
 
+  const projectType =
+    sourceType === 'github' ? 'github' :
+      sourceType === 'youtube' ? 'video' :
+        'paper';
+
   const escapeMarkdownAlt = (text: string) => {
     return text
       .replace(/\[/g, '\\[')
@@ -429,23 +1288,7 @@ async function saveMarkdownFile(
     })()
     : '';
 
-  const markdown = `---
-id: ${projectId}
-title: ${data.title}
-description: ${data.abstract.substring(0, 100)}...
-type: ${sourceType === 'github' ? 'github' : 'paper'}
-createdAt: ${new Date().toISOString().split('T')[0]}
-authors: [${data.authors.map((a) => `'${a.name}'`).join(', ')}]
-published: true
-venue: ${data.venue}
-year: ${researchYear || data.year || new Date().getFullYear().toString()}
-institution: ${data.institution}
-${sourceType === 'github' ? `githubUrl: ${sourceUrl}` : ''}
-${sourceType === 'pdf' ? `arxivUrl: ${sourceUrl}` : ''}
-${data.youtubeVideoId ? `youtubeVideoId: ${data.youtubeVideoId}` : ''}
----
-
-# ${data.title}
+  const markdownBody = `# ${data.title}
 
 **Authors:** ${authorsList}
 
@@ -470,6 +1313,44 @@ ${data.youtubeVideoId ? `## Video Presentation\n\n[![Video](https://img.youtube.
 
 ${data.bibtex ? `## BibTeX\n\n\`\`\`bibtex\n${data.bibtex.code}\n\`\`\`\n` : ''}
 `;
+
+  const frontmatterData: Record<string, unknown> = {
+    id: projectId,
+    title: data.title,
+    description: `${data.abstract.substring(0, 100)}...`,
+    type: projectType,
+    createdAt: new Date().toISOString().split('T')[0],
+    authors: data.authors.map((a) => a.name),
+    authorsDetailed: data.authors.map((a) => ({
+      name: a.name,
+      ...(a.url ? { url: a.url } : {}),
+      ...(a.affiliation ? { affiliation: a.affiliation } : {}),
+      ...(typeof a.equalContribution === 'boolean'
+        ? { equalContribution: a.equalContribution }
+        : {}),
+    })),
+    published: true,
+    venue: data.venue,
+    year: researchYear || data.year || new Date().getFullYear().toString(),
+    institution: data.institution,
+  };
+
+  const normalizedSourceUrl = sourceUrl.trim();
+
+  if (sourceType === 'github' && normalizedSourceUrl) {
+    frontmatterData.githubUrl = normalizedSourceUrl;
+  }
+  if (sourceType === 'pdf' && normalizedSourceUrl) {
+    frontmatterData.arxivUrl = normalizedSourceUrl;
+  }
+  if (sourceType === 'youtube' && normalizedSourceUrl) {
+    frontmatterData.videoUrl = normalizedSourceUrl;
+  }
+  if (data.youtubeVideoId) {
+    frontmatterData.youtubeVideoId = data.youtubeVideoId;
+  }
+
+  const markdown = matter.stringify(markdownBody, frontmatterData);
 
   const filepath = path.join(contentDir, `${projectId}.md`);
   await writeFile(filepath, markdown, 'utf-8');
